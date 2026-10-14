@@ -62,7 +62,10 @@ const NON_ID_TEXT_COLUMNS: &[(&str, &str)] = &[
 ];
 
 /// Table-specific non-identity UUID columns not covered by the generic names.
-const NON_IDENTITY_UUID_COLUMNS: &[(&str, &str)] = &[];
+const NON_IDENTITY_UUID_COLUMNS: &[(&str, &str)] = &[
+    ("recovery_approvals", "withdrawal_signing_key_id"),
+    ("recovery_requests", "request_event_id"),
+];
 
 #[tokio::test]
 #[ignore]

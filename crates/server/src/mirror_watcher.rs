@@ -4539,6 +4539,7 @@ mod tests {
             None,
         );
         let mut entry = mk_entry(network_id, seq, "friend.accepted", actor.id, Some(payload));
+        entry.subject = format!("identity:{from}:self:friend_accepted");
         sign_entry(&mut entry, network_id, ticket, actor);
         entry
     }
@@ -5006,8 +5007,11 @@ mod tests {
             TestIdentity::new(),
         );
         let (inception, stolen_key, second_key) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let grant_for = |seq: i64, device: &TestIdentity, key_id: Uuid, prev: Option<[u8; 32]>| {
-            let chain_seq = seq as u64 - 2;
+        let grant_for = |seq: i64,
+                         chain_seq: u64,
+                         device: &TestIdentity,
+                         key_id: Uuid,
+                         prev: Option<[u8; 32]>| {
             let bytes = avalon_protocol::identity_id::device_grant_approval_signing_bytes(
                 &network_id,
                 key_id,
@@ -5035,14 +5039,16 @@ mod tests {
                 )),
             )
         };
-        let stolen_grant = grant_for(3, &stolen, stolen_key, None);
+        // The revoking key is added at chain position 2 and revokes at 3, but its grant is delivered last.
+        let stolen_grant = grant_for(3, 1, &stolen, stolen_key, None);
+        let second_grant = grant_for(5, 2, &second, second_key, Some(chain_hash(&stolen_grant)));
         let revoke_bytes = avalon_protocol::identity_id::signing_key_revoked_signing_bytes(
             &network_id,
             &who.id,
             stolen_key,
             second_key,
-            2,
-            Some(&chain_hash(&stolen_grant)),
+            3,
+            Some(&chain_hash(&second_grant)),
         );
         let revoke_signature =
             ed25519_dalek::Signer::sign(&second.signing_key, &revoke_bytes).to_bytes();
@@ -5056,11 +5062,10 @@ mod tests {
                     "identity_id": who.id, "signing_key_id": stolen_key,
                     "revoked_by_signing_key_id": second_key, "signature": b64(&revoke_signature),
                 }),
-                2,
-                Some(chain_hash(&stolen_grant)),
+                3,
+                Some(chain_hash(&second_grant)),
             )),
         );
-        let second_grant = grant_for(5, &second, second_key, Some(chain_hash(&revocation)));
         let entries = vec![
             mk_entry(
                 &network_id,
@@ -5270,11 +5275,9 @@ mod tests {
         .await
         .unwrap();
         assert!(reason.is_some_and(|r| r.contains("parent")));
-        assert_eq!(deferral::waiting_len(&network_id, mirror::CORE_SHARD_ID), 0);
-        assert_eq!(
-            report.projected, 1,
-            "the later entry is released: {report:?}"
-        );
+        // The later entry no longer holds the shard back; it waits for the chain position below it.
+        assert_eq!(deferral::waiting_len(&network_id, mirror::CORE_SHARD_ID), 1);
+        assert_eq!(report.projected, 0, "{report:?}");
     }
 
     /// A grant waiting for its approving key, a creation, and optionally the approving key.
@@ -5286,25 +5289,47 @@ mod tests {
 
     fn key_wait(network_id: &str) -> KeyWait {
         let who = TestIdentity::new();
-        let device = TestIdentity::new();
-        let (approver, grant_id) = (Uuid::new_v4(), Uuid::new_v4());
-        let bytes = avalon_protocol::identity_id::device_grant_approval_signing_bytes(
+        let (device, approving_device) = (TestIdentity::new(), TestIdentity::new());
+        let (ticket, approver, grant_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let sign = |signer: &TestIdentity, bytes: Vec<u8>| {
+            ed25519_dalek::Signer::sign(&signer.signing_key, &bytes).to_bytes()
+        };
+        // The approving device's key is added at chain position 1 (delivered last); the grant it approves is at 2.
+        let adds_approver = mk_entry(
             network_id,
-            grant_id,
-            &who.id,
-            approver,
-            &device.public_key(),
-            1,
-            None,
+            3,
+            "identity.signing_key_added",
+            who.id,
+            Some(chained(
+                serde_json::json!({
+                    "signing_key_id": approver, "public_key": b64(&approving_device.public_key()),
+                    "device_label": null, "approved_by_signing_key_id": ticket,
+                    "identity_id": who.id, "kind": "device_grant",
+                    "grant_id": approver, "approval_signature": b64(&sign(
+                        &who,
+                        avalon_protocol::identity_id::device_grant_approval_signing_bytes(
+                            network_id, approver, &who.id, ticket,
+                            &approving_device.public_key(), 1, None,
+                        ),
+                    )),
+                }),
+                1,
+                None,
+            )),
         );
-        let signature = ed25519_dalek::Signer::sign(&who.signing_key, &bytes).to_bytes();
+        let prev = chain_hash(&adds_approver);
         KeyWait {
             created: mk_entry(
                 network_id,
                 1,
                 "identity.created",
                 who.id,
-                Some(created_payload(&who, network_id, "key-wait-user")),
+                Some(created_payload_for(
+                    &who,
+                    network_id,
+                    "key-wait-user",
+                    ticket,
+                )),
             ),
             grant: mk_entry(
                 network_id,
@@ -5316,23 +5341,19 @@ mod tests {
                         "signing_key_id": grant_id, "public_key": b64(&device.public_key()),
                         "device_label": null, "approved_by_signing_key_id": approver,
                         "identity_id": who.id, "kind": "device_grant",
-                        "grant_id": grant_id, "approval_signature": b64(&signature),
+                        "grant_id": grant_id, "approval_signature": b64(&sign(
+                            &approving_device,
+                            avalon_protocol::identity_id::device_grant_approval_signing_bytes(
+                                network_id, grant_id, &who.id, approver,
+                                &device.public_key(), 2, Some(&prev),
+                            ),
+                        )),
                     }),
-                    1,
-                    None,
+                    2,
+                    Some(prev),
                 )),
             ),
-            approver_key: mk_entry(
-                network_id,
-                3,
-                "identity.signing_key_added",
-                who.id,
-                Some(serde_json::json!({
-                    "signing_key_id": approver, "public_key": b64(&who.public_key()),
-                    "device_label": null, "approved_by_signing_key_id": approver,
-                    "identity_id": who.id, "kind": "inception",
-                })),
-            ),
+            approver_key: adds_approver,
         }
     }
 
@@ -5560,14 +5581,39 @@ mod tests {
         let who = TestIdentity::new();
         let (inception, device_key) = (Uuid::new_v4(), Uuid::new_v4());
         let device = TestIdentity::new();
+        // The inception key revokes itself at chain position 1; the grant it approves sits at 2.
+        let revoke_bytes = avalon_protocol::identity_id::signing_key_revoked_signing_bytes(
+            &network_id,
+            &who.id,
+            inception,
+            inception,
+            1,
+            None,
+        );
+        let revocation = mk_entry(
+            &network_id,
+            3,
+            "identity.signing_key_revoked",
+            who.id,
+            Some(chained(
+                serde_json::json!({
+                    "identity_id": who.id, "signing_key_id": inception,
+                    "revoked_by_signing_key_id": inception,
+                    "signature": b64(&ed25519_dalek::Signer::sign(&who.signing_key, &revoke_bytes).to_bytes()),
+                }),
+                1,
+                None,
+            )),
+        );
+        let prev = chain_hash(&revocation);
         let bytes = avalon_protocol::identity_id::device_grant_approval_signing_bytes(
             &network_id,
             device_key,
             &who.id,
             inception,
             &device.public_key(),
-            1,
-            None,
+            2,
+            Some(&prev),
         );
         let signature = ed25519_dalek::Signer::sign(&who.signing_key, &bytes).to_bytes();
         let created = mk_entry(
@@ -5575,7 +5621,12 @@ mod tests {
             1,
             "identity.created",
             who.id,
-            Some(created_payload(&who, &network_id, "leak-user")),
+            Some(created_payload_for(
+                &who,
+                &network_id,
+                "leak-user",
+                inception,
+            )),
         );
         let grant = mk_entry(
             &network_id,
@@ -5589,11 +5640,11 @@ mod tests {
                     "identity_id": who.id, "kind": "device_grant",
                     "grant_id": device_key, "approval_signature": b64(&signature),
                 }),
-                1,
-                None,
+                2,
+                Some(prev),
             )),
         );
-        for e in [&created, &grant] {
+        for e in [&created, &grant, &revocation] {
             mirror::insert_mirrored_entry(&pool, e).await.unwrap();
         }
         project_entry(&pool, &indexer, &created).await;
@@ -5603,18 +5654,8 @@ mod tests {
         ));
         assert_eq!(deferral::waiting_len(&network_id, mirror::CORE_SHARD_ID), 1);
 
-        // The approving key shows up already revoked: the entry is refused for good.
-        sqlx::query(
-            "INSERT INTO indexer_identity_signing_keys \
-             (signing_key_id, identity_id, public_key, added_at, revoked_at) \
-             VALUES ($1, $2, $3, now(), now())",
-        )
-        .bind(inception)
-        .bind(who.id)
-        .bind(TestIdentity::new().public_key().to_vec())
-        .execute(&pool)
-        .await
-        .unwrap();
+        // The chain below the grant arrives and shows its approving key revoked: refused for good.
+        project_entry(&pool, &indexer, &revocation).await;
         assert!(matches!(
             project_entry(&pool, &indexer, &grant).await,
             ProjectionOutcome::Permanent(_)
