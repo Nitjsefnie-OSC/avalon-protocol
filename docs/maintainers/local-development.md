@@ -43,7 +43,7 @@ cp .env.compose.example .env
 `docker-compose.yml` exactly (`DATABASE_URL=postgres://avalon:avalon@localhost:5432/avalon`,
 plus the WebAuthn/network settings needed to boot) — no hand-editing needed
 for this path. `.env.example` is the fuller, commented reference for every
-variable the server reads (settlement signing key, recovery delay, retention
+variable the server reads (settlement signing key, retention
 tier, ...) if you need to point at a different Postgres or change a default.
 
 ## 3. Migrate

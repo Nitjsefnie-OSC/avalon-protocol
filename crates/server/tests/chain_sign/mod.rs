@@ -290,6 +290,29 @@ pub async fn recovery_configured(
     .await
 }
 
+/// The owner's chained veto of recovery request `request_id`.
+pub async fn recovery_cancelled(
+    identity: IdentityId,
+    request_id: Uuid,
+    reason: Option<&str>,
+) -> serde_json::Value {
+    sign(
+        identity,
+        "identity.recovery_cancelled",
+        identity_ref(identity, "recovery_cancelled"),
+        identity_ref(identity, "recovery_cancelled"),
+        serde_json::to_value(
+            avalon_protocol::event_payloads::IdentityRecoveryCancelledPayload {
+                request_id,
+                cancelled_by: identity,
+                reason: reason.map(str::to_string),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+}
+
 /// The `PATCH /me` body `body` plus the `chain_event` for the `profile.updated` it produces.
 pub async fn profile_patch(identity: IdentityId, mut body: serde_json::Value) -> serde_json::Value {
     const NULLABLE: [&str; 9] = [

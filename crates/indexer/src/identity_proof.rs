@@ -384,11 +384,21 @@ fn require_binding(event: &ProtocolEvent, signer: IdentityId) -> Result<(), Inde
     match event.kind.as_str() {
         "profile.updated"
         | "identity.recovery_configured"
+        | "identity.recovery_cancelled"
         | "identity.recovered"
         | "identity.passkey_registered"
         | "identity.passkey_revoked" => {
             if !subject.is_some_and(own) {
                 return Err(bad("subject is not the signer"));
+            }
+            if event.kind == "identity.recovery_cancelled" {
+                let by: Option<IdentityId> = event
+                    .payload
+                    .get("cancelled_by")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                if !by.is_some_and(own) {
+                    return Err(bad("is not cancelled by the owner"));
+                }
             }
             if event.kind.starts_with("identity.passkey_") {
                 let p: serde_json::Value = event.payload.clone();

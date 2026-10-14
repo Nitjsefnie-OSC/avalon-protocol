@@ -117,7 +117,8 @@ pub struct KeyEventHashInput<'a> {
 /// (1 device grant, 2 revocation), then for a grant the key id and approver key id (uuid), the key,
 /// the grant id (uuid) and the approval signature, and for a revocation the key id and revoker key id
 /// (uuid) and the signature. The event id, time, issuer, subject, label and the position's own
-/// envelope are not covered: no signature covers them.
+/// envelope are not covered: no signature covers them, so they are untrusted display data and no
+/// decision (key validity, the recovery delay) reads them.
 pub fn key_event_signing_bytes(
     input: &KeyEventHashInput<'_>,
 ) -> Result<Vec<u8>, SigningBytesError> {

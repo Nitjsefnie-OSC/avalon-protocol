@@ -12,15 +12,10 @@
 //! `Webauthn::start_passkey_registration`), so that part uses the same
 //! virtual-authenticator client `passkeys.rs` already established.
 //!
-//! The mandatory public time-delay is not waited out in real time — these
-//! tests instead assert the *state machine* (status transitions,
-//! `delay_ends_at` being set correctly, finalize refusing early) and, for
-//! the one test that exercises a successful finalize end-to-end, backdate
-//! `delay_ends_at` directly via SQL rather than sleeping for
-//! `AVALON_RECOVERY_DELAY_HOURS` real hours — the same "manipulate the
-//! clock-dependent column directly, since the point under test is the
-//! comparison logic, not the wall-clock wait" approach `presence.rs`'s
-//! `stale_presence_expires_to_offline` uses for TTL expiry.
+//! The mandatory public time-delay is not waited out in real time. It is
+//! measured between cosigned tree heads, so the tests that need it to have
+//! run add a later tree head to the node's own `signed_tree_heads` (see
+//! `elapse_delay`) instead of sleeping for 48 hours, and remove it again.
 
 mod chain_sign;
 
@@ -140,6 +135,32 @@ fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilde
     request.bearer_auth(token)
 }
 
+/// The request once its marker is in a ledger entry (guardians approve against that entry).
+async fn committed(http: &reqwest::Client, base: &str, request_id: &str) -> serde_json::Value {
+    for _ in 0..300 {
+        let request: serde_json::Value = http
+            .get(format!("{base}/recovery/requests/{request_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if !request["request_entry_hash"].is_null() {
+            return request;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the request marker was never committed to the ledger");
+}
+
+fn hash32(text: &serde_json::Value) -> [u8; 32] {
+    hex::decode(text.as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
 /// Drives a real recovery-initiation ceremony (`start`/`finish`) for
 /// `identity_id` and returns the resulting `recovery_requests` row id plus
 /// its JSON body.
@@ -171,12 +192,22 @@ async fn initiate_recovery(
         .await
         .expect("virtual authenticator registration should succeed");
 
+    let request_id = Uuid::new_v4();
+    let request_bytes = avalon_protocol::identity_id::recovery_request_signing_bytes(
+        &chain_sign::network_id(),
+        &identity_id,
+        request_id,
+        &new_key.verifying_key().to_bytes(),
+        &hash32(&start["config_event_hash"]),
+    );
     let request = http
         .post(format!("{base}/recovery/requests/finish"))
         .json(&serde_json::json!({
             "ticket_id": ticket_id,
             "webauthn_credential": credential,
             "new_signing_public_key": BASE64.encode(new_key.verifying_key().to_bytes()),
+            "request_id": request_id,
+            "signature": BASE64.encode(new_key.sign(&request_bytes).to_bytes()),
         }))
         .send()
         .await
@@ -189,14 +220,20 @@ async fn initiate_recovery(
     (request, new_key)
 }
 
-/// A guardian's approval body: their own active key's signature over the request and its new key.
-fn approval(
+/// A guardian's approval body: their own active key, their chain position and a signature over the
+/// request, its new key, the request marker's ledger entry and the configuration relied on.
+async fn approval(
+    http: &reqwest::Client,
+    base: &str,
     owner: avalon_protocol::ids::IdentityId,
     guardian: avalon_protocol::ids::IdentityId,
     request_id: &str,
     new_key: &SigningKey,
 ) -> serde_json::Value {
+    let request = committed(http, base, request_id).await;
     let (key, key_id) = chain_sign::key_of(guardian);
+    let (head_seq, head_hash) = chain_sign::head(guardian).await;
+    let prev: Option<[u8; 32]> = head_hash.as_deref().map(|h| hash32(&h.into()));
     let bytes = avalon_protocol::identity_id::recovery_approval_signing_bytes(
         &chain_sign::network_id(),
         &owner,
@@ -204,15 +241,110 @@ fn approval(
         &guardian,
         key_id,
         &new_key.verifying_key().to_bytes(),
+        &avalon_protocol::identity_id::RecoveryApprovalBinding {
+            request_entry_hash: &hash32(&request["request_entry_hash"]),
+            config_event_hash: &hash32(&request["config_event_hash"]),
+            guardian_seq: head_seq + 1,
+            guardian_prev_hash: prev.as_ref(),
+        },
     );
     serde_json::json!({
         "signing_key_id": key_id,
+        "seq": head_seq + 1,
+        "prev_hash": head_hash,
         "signature": BASE64.encode(key.sign(&bytes).to_bytes()),
     })
 }
 
+/// A guardian's signed withdrawal body for their approval of `request_id`.
+async fn withdrawal(
+    owner: avalon_protocol::ids::IdentityId,
+    guardian: avalon_protocol::ids::IdentityId,
+    request_id: &str,
+) -> serde_json::Value {
+    let (key, key_id) = chain_sign::key_of(guardian);
+    let (head_seq, head_hash) = chain_sign::head(guardian).await;
+    let prev: Option<[u8; 32]> = head_hash.as_deref().map(|h| hash32(&h.into()));
+    let bytes = avalon_protocol::identity_id::recovery_withdrawal_signing_bytes(
+        &chain_sign::network_id(),
+        &owner,
+        request_id.parse().unwrap(),
+        &guardian,
+        key_id,
+        head_seq + 1,
+        prev.as_ref(),
+    );
+    serde_json::json!({
+        "signing_key_id": key_id,
+        "seq": head_seq + 1,
+        "prev_hash": head_hash,
+        "signature": BASE64.encode(key.sign(&bytes).to_bytes()),
+    })
+}
+
+/// The owner's veto body: the chained, signed `identity.recovery_cancelled`.
+async fn cancel_body(
+    owner: avalon_protocol::ids::IdentityId,
+    request_id: &str,
+    reason: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "reason": reason,
+        "chain_event": chain_sign::recovery_cancelled(owner, request_id.parse().unwrap(), reason).await,
+    })
+}
+
+/// Makes the delay of `request_id` run in cosigned-head time: waits for a tree head covering the
+/// request marker, then adds a later head 49 hours after it. Returns that head's size for
+/// [`remove_head`].
+async fn elapse_delay(pool: &PgPool, request_id: &str) -> i64 {
+    let request_event_id: Uuid =
+        sqlx::query_scalar("SELECT request_event_id FROM recovery_requests WHERE id = $1")
+            .bind(Uuid::parse_str(request_id).unwrap())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    for _ in 0..300 {
+        let covered: Option<OffsetDateTime> = sqlx::query_scalar(
+            "SELECT h.created_at FROM signed_tree_heads h \
+             JOIN ledger_entries e ON e.event_id = $1 AND h.tree_size >= e.seq \
+             ORDER BY h.tree_size LIMIT 1",
+        )
+        .bind(request_event_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        if let Some(covered) = covered {
+            let size: i64 = sqlx::query_scalar(
+                "INSERT INTO signed_tree_heads \
+                 (tree_size, root_hash, network_id, signing_key_id, signature, created_at, \
+                  layout_version, rules_version, hash_algo, extensions) \
+                 SELECT tree_size + 100000, repeat('0', 64), network_id, signing_key_id, \
+                        signature, $1, layout_version, rules_version, hash_algo, extensions \
+                 FROM signed_tree_heads ORDER BY tree_size DESC LIMIT 1 RETURNING tree_size",
+            )
+            .bind(covered + time::Duration::hours(49))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            return size;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("no tree head ever covered the request marker");
+}
+
+async fn remove_head(pool: &PgPool, tree_size: i64) {
+    sqlx::query("DELETE FROM signed_tree_heads WHERE tree_size = $1")
+        .bind(tree_size)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 /// The `finalize` body: the recovered event of `GET .../recovered-draft`, signed by `signer`
-/// (the request's new key unless a test passes another) at the owner's chain head plus one.
+/// (the request's new key unless a test passes another) at the owner's chain head plus one,
+/// with the approval ids the draft carried.
 async fn finalize_body(
     http: &reqwest::Client,
     base: &str,
@@ -244,7 +376,7 @@ async fn finalize_body(
         prev,
     )
     .await;
-    serde_json::json!({ "chain_event": chain_event })
+    serde_json::json!({ "chain_event": chain_event, "approval_ids": draft["approval_ids"] })
 }
 
 /// A request-shaped `chain_event` whose signature cannot verify, for requests refused before it is read.
@@ -345,7 +477,7 @@ async fn three_guardian_two_of_three_threshold_recovers_after_backdated_delay() 
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g1_token,
     )
-    .json(&approval(owner_id, g1_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g1_id, &request_id, &new_key).await)
     .send()
     .await
     .unwrap()
@@ -373,7 +505,7 @@ async fn three_guardian_two_of_three_threshold_recovers_after_backdated_delay() 
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g3_token,
     )
-    .json(&approval(owner_id, g3_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g3_id, &request_id, &new_key).await)
     .send()
     .await
     .unwrap()
@@ -384,7 +516,6 @@ async fn three_guardian_two_of_three_threshold_recovers_after_backdated_delay() 
     .unwrap();
     assert_eq!(after_second["status"], "delay");
     assert_eq!(after_second["approvals_count"], 2);
-    assert!(!after_second["delay_ends_at"].is_null());
 
     // Still within the delay window — finalize is refused.
     let still_too_early = http
@@ -395,16 +526,10 @@ async fn three_guardian_two_of_three_threshold_recovers_after_backdated_delay() 
         .unwrap();
     assert_eq!(still_too_early.status().as_u16(), 409);
 
-    // Backdate the delay directly (see module docs) rather than sleeping
-    // for real hours, then finalize should succeed.
+    // Let the delay run in cosigned-head time (see module docs) rather than sleeping for real
+    // hours, then finalize should succeed.
     let request_uuid = Uuid::parse_str(&request_id).unwrap();
-    sqlx::query(
-        "UPDATE recovery_requests SET delay_ends_at = now() - interval '1 minute' WHERE id = $1",
-    )
-    .bind(request_uuid)
-    .execute(&pool)
-    .await
-    .unwrap();
+    let added_head = elapse_delay(&pool, &request_id).await;
 
     let me_status = |token: String| {
         let http = http.clone();
@@ -537,6 +662,7 @@ async fn three_guardian_two_of_three_threshold_recovers_after_backdated_delay() 
         .await
         .unwrap();
     assert!(refinalized.status().is_success());
+    remove_head(&pool, added_head).await;
     let passkey_count_after_refinalize: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM identity_keys WHERE identity_id = $1")
             .bind(owner_id)
@@ -568,7 +694,7 @@ async fn a_guardian_below_threshold_cannot_unilaterally_recover() {
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g1_token,
     )
-    .json(&approval(owner_id, g1_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g1_id, &request_id, &new_key).await)
     .send()
     .await
     .unwrap()
@@ -579,16 +705,10 @@ async fn a_guardian_below_threshold_cannot_unilaterally_recover() {
     .unwrap();
     assert_eq!(after_one["status"], "pending_approvals");
 
-    // Even backdating a (nonexistent) delay can't help — the request never
-    // left `pending_approvals`, so finalize must still refuse.
+    // Even a delay that has run can't help — the request never left `pending_approvals`, so
+    // finalize must still refuse.
     let request_uuid = Uuid::parse_str(&request_id).unwrap();
-    sqlx::query(
-        "UPDATE recovery_requests SET delay_ends_at = now() - interval '1 hour' WHERE id = $1",
-    )
-    .bind(request_uuid)
-    .execute(&pool)
-    .await
-    .unwrap();
+    let added_head = elapse_delay(&pool, &request_id).await;
 
     let finalize_attempt = http
         .post(format!("{base}/recovery/requests/{request_id}/finalize"))
@@ -611,6 +731,7 @@ async fn a_guardian_below_threshold_cannot_unilaterally_recover() {
         .await
         .unwrap();
     assert!(!forced.status().is_success(), "{:?}", forced.status());
+    remove_head(&pool, added_head).await;
     let status: String = sqlx::query_scalar("SELECT status FROM recovery_requests WHERE id = $1")
         .bind(request_uuid)
         .fetch_one(&pool)
@@ -649,7 +770,7 @@ async fn the_owner_vetoes_and_the_attempt_is_cancelled() {
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g1_token,
     )
-    .json(&approval(owner_id, g1_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g1_id, &request_id, &new_key).await)
     .send()
     .await
     .unwrap()
@@ -659,7 +780,7 @@ async fn the_owner_vetoes_and_the_attempt_is_cancelled() {
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g2_token,
     )
-    .json(&approval(owner_id, g2_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g2_id, &request_id, &new_key).await)
     .send()
     .await
     .unwrap()
@@ -678,7 +799,7 @@ async fn the_owner_vetoes_and_the_attempt_is_cancelled() {
         http.post(format!("{base}/recovery/requests/{request_id}/cancel")),
         &owner_token,
     )
-    .json(&serde_json::json!({ "reason": "not me" }))
+    .json(&cancel_body(owner_id, &request_id, Some("not me")).await)
     .send()
     .await
     .unwrap()
@@ -689,15 +810,8 @@ async fn the_owner_vetoes_and_the_attempt_is_cancelled() {
     .unwrap();
     assert_eq!(cancelled["status"], "cancelled");
 
-    // Even backdating the delay after a cancel can never resurrect it.
-    let request_uuid = Uuid::parse_str(&request_id).unwrap();
-    sqlx::query(
-        "UPDATE recovery_requests SET delay_ends_at = now() - interval '1 hour' WHERE id = $1",
-    )
-    .bind(request_uuid)
-    .execute(&pool)
-    .await
-    .unwrap();
+    // Even a delay that has run after a cancel can never resurrect it.
+    let added_head = elapse_delay(&pool, &request_id).await;
     let finalize_after_cancel = http
         .post(format!("{base}/recovery/requests/{request_id}/finalize"))
         .json(&finalize_body(&http, &base, owner_id, &request_id, &new_key).await)
@@ -705,6 +819,7 @@ async fn the_owner_vetoes_and_the_attempt_is_cancelled() {
         .await
         .unwrap();
     assert_eq!(finalize_after_cancel.status().as_u16(), 409);
+    remove_head(&pool, added_head).await;
 
     let passkey_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM identity_keys WHERE identity_id = $1")
@@ -731,14 +846,23 @@ async fn a_guardian_removed_from_the_set_can_no_longer_approve_or_cancel() {
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, g1_token) = seed_identity_session(&pool).await;
     let (g2_id, _g2_token) = seed_identity_session(&pool).await;
-    for guardian in [g1_id, g2_id] {
+    let (g3_id, _g3_token) = seed_identity_session(&pool).await;
+    for guardian in [g1_id, g2_id, g3_id] {
         seed_friendship(&pool, owner_id, guardian).await;
     }
-    configure_guardians(&http, &base, owner_id, &owner_token, &[g1_id, g2_id], 2).await;
+    configure_guardians(
+        &http,
+        &base,
+        owner_id,
+        &owner_token,
+        &[g1_id, g2_id, g3_id],
+        2,
+    )
+    .await;
 
-    // Owner narrows the guardian set to just g2 — requires (and proves)
+    // Owner narrows the guardian set to g2 and g3 — requires (and proves)
     // the owner's own current session, never g1's cooperation.
-    configure_guardians(&http, &base, owner_id, &owner_token, &[g2_id], 1).await;
+    configure_guardians(&http, &base, owner_id, &owner_token, &[g2_id, g3_id], 2).await;
 
     let (request, new_key) = initiate_recovery(&http, &base, owner_id).await;
     let request_id = request["id"].as_str().unwrap().to_string();
@@ -747,21 +871,22 @@ async fn a_guardian_removed_from_the_set_can_no_longer_approve_or_cancel() {
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g1_token,
     )
-    .json(&approval(owner_id, g1_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g1_id, &request_id, &new_key).await)
     .send()
     .await
     .unwrap();
     assert_eq!(approve_as_removed_guardian.status().as_u16(), 403);
 
-    let cancel_as_removed_guardian = auth(
+    // Only the owner may cancel; a guardian's recourse is to withdraw their own approval.
+    let cancel_as_guardian = auth(
         http.post(format!("{base}/recovery/requests/{request_id}/cancel")),
         &g1_token,
     )
-    .json(&serde_json::json!({}))
+    .json(&cancel_body(g1_id, &request_id, None).await)
     .send()
     .await
     .unwrap();
-    assert_eq!(cancel_as_removed_guardian.status().as_u16(), 403);
+    assert_eq!(cancel_as_guardian.status().as_u16(), 403);
 }
 
 #[tokio::test]
@@ -797,10 +922,20 @@ async fn removing_a_guardian_requires_a_fresh_signature() {
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, _g1_token) = seed_identity_session(&pool).await;
     let (g2_id, _g2_token) = seed_identity_session(&pool).await;
-    seed_friendship(&pool, owner_id, g1_id).await;
-    seed_friendship(&pool, owner_id, g2_id).await;
+    let (g3_id, _g3_token) = seed_identity_session(&pool).await;
+    for guardian in [g1_id, g2_id, g3_id] {
+        seed_friendship(&pool, owner_id, guardian).await;
+    }
 
-    configure_guardians(&http, &base, owner_id, &owner_token, &[g1_id, g2_id], 1).await;
+    configure_guardians(
+        &http,
+        &base,
+        owner_id,
+        &owner_token,
+        &[g1_id, g2_id, g3_id],
+        2,
+    )
+    .await;
 
     // Dropping g1 without a signature is rejected outright.
     let unsigned = auth(
@@ -808,9 +943,9 @@ async fn removing_a_guardian_requires_a_fresh_signature() {
         &owner_token,
     )
     .json(&serde_json::json!({
-        "guardian_ids": [g2_id],
-        "threshold": 1,
-        "chain_event": chain_sign::recovery_configured(owner_id, vec![g2_id], 1).await,
+        "guardian_ids": [g2_id, g3_id],
+        "threshold": 2,
+        "chain_event": chain_sign::recovery_configured(owner_id, vec![g2_id, g3_id], 2).await,
     }))
     .send()
     .await
@@ -835,10 +970,10 @@ async fn removing_a_guardian_requires_a_fresh_signature() {
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_eq!(guardian_ids.len(), 2, "unsigned removal must not apply");
+    assert_eq!(guardian_ids.len(), 3, "unsigned removal must not apply");
 
     // The same removal, correctly signed, succeeds.
-    configure_guardians(&http, &base, owner_id, &owner_token, &[g2_id], 1).await;
+    configure_guardians(&http, &base, owner_id, &owner_token, &[g2_id, g3_id], 2).await;
 
     let after_signed: serde_json::Value = auth(
         http.get(format!("{base}/me/recovery/guardians")),
@@ -850,7 +985,7 @@ async fn removing_a_guardian_requires_a_fresh_signature() {
     .json()
     .await
     .unwrap();
-    assert_eq!(after_signed["guardian_ids"].as_array().unwrap().len(), 1);
+    assert_eq!(after_signed["guardian_ids"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -862,15 +997,21 @@ async fn guardians_must_be_current_friends_not_arbitrary_identities() {
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (stranger_id, _stranger_token) = seed_identity_session(&pool).await;
+    let (other_stranger_id, _other_token) = seed_identity_session(&pool).await;
 
     let attempt = auth(
         http.put(format!("{base}/me/recovery/guardians")),
         &owner_token,
     )
     .json(&serde_json::json!({
-        "guardian_ids": [stranger_id],
-        "threshold": 1,
-        "chain_event": chain_sign::recovery_configured(owner_id, vec![stranger_id], 1).await,
+        "guardian_ids": [stranger_id, other_stranger_id],
+        "threshold": 2,
+        "chain_event": chain_sign::recovery_configured(
+            owner_id,
+            vec![stranger_id, other_stranger_id],
+            2,
+        )
+        .await,
     }))
     .send()
     .await
@@ -892,14 +1033,16 @@ async fn start_gives_no_distinguishable_signal_between_nonexistent_and_unconfigu
 
     let (configured_owner, configured_token) = seed_identity_session(&pool).await;
     let (guardian_id, _guardian_token) = seed_identity_session(&pool).await;
+    let (second_guardian_id, _second_guardian_token) = seed_identity_session(&pool).await;
     seed_friendship(&pool, configured_owner, guardian_id).await;
+    seed_friendship(&pool, configured_owner, second_guardian_id).await;
     configure_guardians(
         &http,
         &base,
         configured_owner,
         &configured_token,
-        &[guardian_id],
-        1,
+        &[guardian_id, second_guardian_id],
+        2,
     )
     .await;
     // Deliberately NOT calling configure_guardians for a second, real
@@ -975,7 +1118,7 @@ async fn a_racing_approval_never_resurrects_a_cancelled_request() {
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g1_token,
     )
-    .json(&approval(owner_id, g1_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g1_id, &request_id, &new_key).await)
     .send()
     .await
     .unwrap()
@@ -986,16 +1129,18 @@ async fn a_racing_approval_never_resurrects_a_cancelled_request() {
     // whichever the database actually serializes first is authoritative;
     // what must never happen is the row ending up with `cancelled_at` set
     // while `status` says anything other than `cancelled`.
+    let cancel_request = cancel_body(owner_id, &request_id, None).await;
     let cancel = auth(
         http.post(format!("{base}/recovery/requests/{request_id}/cancel")),
         &owner_token,
     )
+    .json(&cancel_request)
     .send();
     let approve = auth(
         http.post(format!("{base}/recovery/requests/{request_id}/approve")),
         &g2_token,
     )
-    .json(&approval(owner_id, g2_id, &request_id, &new_key))
+    .json(&approval(&http, &base, owner_id, g2_id, &request_id, &new_key).await)
     .send();
     let (_cancel_result, _approve_result) = tokio::join!(cancel, approve);
 
@@ -1046,8 +1191,18 @@ async fn guardian_of_lists_only_identities_naming_the_caller() {
     let (bystander_id, bystander_token) = seed_identity_session(&pool).await;
     let _ = bystander_id;
 
+    let (second_id, _second_token) = seed_identity_session(&pool).await;
     seed_friendship(&pool, owner_id, guardian_id).await;
-    configure_guardians(&http, &base, owner_id, &owner_token, &[guardian_id], 1).await;
+    seed_friendship(&pool, owner_id, second_id).await;
+    configure_guardians(
+        &http,
+        &base,
+        owner_id,
+        &owner_token,
+        &[guardian_id, second_id],
+        2,
+    )
+    .await;
 
     let mine: Vec<serde_json::Value> = auth(
         http.get(format!("{base}/me/recovery/guardian-of")),
@@ -1144,6 +1299,7 @@ async fn recovery_ready_to_finalize(
     String,
     Vec<Uuid>,
     SigningKey,
+    i64,
 ) {
     let (owner_id, owner_token) = seed_identity_session(pool).await;
     let (g1_id, g1_token) = seed_identity_session(pool).await;
@@ -1181,21 +1337,22 @@ async fn recovery_ready_to_finalize(
             http.post(format!("{base}/recovery/requests/{request_id}/approve")),
             token,
         )
-        .json(&approval(owner_id, guardian, &request_id, &new_key))
+        .json(&approval(http, base, owner_id, guardian, &request_id, &new_key).await)
         .send()
         .await
         .unwrap()
         .error_for_status()
         .unwrap();
     }
-    sqlx::query(
-        "UPDATE recovery_requests SET delay_ends_at = now() - interval '1 minute' WHERE id = $1",
+    let added_head = elapse_delay(pool, &request_id).await;
+    (
+        owner_id,
+        owner_token,
+        request_id,
+        old_passkeys,
+        new_key,
+        added_head,
     )
-    .bind(Uuid::parse_str(&request_id).unwrap())
-    .execute(pool)
-    .await
-    .unwrap();
-    (owner_id, owner_token, request_id, old_passkeys, new_key)
 }
 
 async fn passkey_revoked_event_count(
@@ -1218,7 +1375,7 @@ async fn finalize_revokes_old_credentials_without_per_passkey_events() {
     let pool = test_pool().await;
     let http = reqwest::Client::new();
     let base = server_url();
-    let (owner_id, _token, request_id, old_passkeys, new_key) =
+    let (owner_id, _token, request_id, old_passkeys, new_key, added_head) =
         recovery_ready_to_finalize(&pool, &http, &base).await;
 
     http.post(format!("{base}/recovery/requests/{request_id}/finalize"))
@@ -1249,6 +1406,7 @@ async fn finalize_revokes_old_credentials_without_per_passkey_events() {
     .await
     .unwrap();
     assert_eq!(recovered, 1);
+    remove_head(&pool, added_head).await;
 }
 
 #[tokio::test]
@@ -1257,7 +1415,7 @@ async fn a_finalize_that_fails_after_the_passkey_delete_changes_nothing() {
     let pool = test_pool().await;
     let http = reqwest::Client::new();
     let base = server_url();
-    let (owner_id, owner_token, request_id, old_passkeys, new_key) =
+    let (owner_id, owner_token, request_id, old_passkeys, new_key, added_head) =
         recovery_ready_to_finalize(&pool, &http, &base).await;
 
     // Another identity already holds the credential id the recovered passkey would insert.
@@ -1308,4 +1466,150 @@ async fn a_finalize_that_fails_after_the_passkey_delete_changes_nothing() {
         .await
         .unwrap();
     assert_eq!(me.status().as_u16(), 200);
+    remove_head(&pool, added_head).await;
+}
+
+/// The recovered draft of a request.
+async fn draft(http: &reqwest::Client, base: &str, request_id: &str) -> serde_json::Value {
+    http.get(format!(
+        "{base}/recovery/requests/{request_id}/recovered-draft"
+    ))
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_withdrawal_rides_in_the_proof_and_a_stale_draft_is_answered_with_the_current_hash() {
+    let pool = test_pool().await;
+    let http = reqwest::Client::new();
+    let base = server_url();
+
+    let (owner_id, owner_token) = seed_identity_session(&pool).await;
+    let mut guardians = Vec::new();
+    for _ in 0..3 {
+        guardians.push(seed_identity_session(&pool).await);
+    }
+    for (guardian, _) in &guardians {
+        seed_friendship(&pool, owner_id, *guardian).await;
+    }
+    let ids: Vec<_> = guardians.iter().map(|(id, _)| *id).collect();
+    configure_guardians(&http, &base, owner_id, &owner_token, &ids, 2).await;
+    let (request, new_key) = initiate_recovery(&http, &base, owner_id).await;
+    let request_id = request["id"].as_str().unwrap().to_string();
+    let approve = |i: usize| {
+        let (http, base, request_id, new_key) = (&http, &base, &request_id, &new_key);
+        let (guardian, token) = guardians[i].clone();
+        async move {
+            auth(
+                http.post(format!("{base}/recovery/requests/{request_id}/approve")),
+                &token,
+            )
+            .json(&approval(http, base, owner_id, guardian, request_id, new_key).await)
+            .send()
+            .await
+            .unwrap()
+        }
+    };
+    let withdraw = |i: usize| {
+        let (http, base, request_id) = (&http, &base, &request_id);
+        let (guardian, token) = guardians[i].clone();
+        async move {
+            auth(
+                http.post(format!("{base}/recovery/requests/{request_id}/withdraw")),
+                &token,
+            )
+            .json(&withdrawal(owner_id, guardian, request_id).await)
+            .send()
+            .await
+            .unwrap()
+        }
+    };
+
+    assert!(approve(0).await.status().is_success());
+    let second = approve(2).await.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(second["status"], "delay");
+    let stale_body = finalize_body(&http, &base, owner_id, &request_id, &new_key).await;
+
+    // A third approval changes the draft: the draft signed earlier is answered with the current hash.
+    assert!(approve(1).await.status().is_success());
+    let added_head = elapse_delay(&pool, &request_id).await;
+    let stale = http
+        .post(format!("{base}/recovery/requests/{request_id}/finalize"))
+        .json(&stale_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status().as_u16(), 409);
+    let stale: serde_json::Value = stale.json().await.unwrap();
+    assert_eq!(stale["code"], "RECOVERY_DRAFT_STALE");
+    let current = draft(&http, &base, &request_id).await;
+    assert_eq!(stale["draft_hash"], current["draft_hash"]);
+
+    // Withdrawing a standing approval is allowed once, and it rides inside the approval proof.
+    let withdrawn = withdraw(0).await;
+    assert!(withdrawn.status().is_success(), "{:?}", withdrawn.status());
+    let withdrawn: serde_json::Value = withdrawn.json().await.unwrap();
+    assert_eq!(withdrawn["approvals_count"], 2);
+    assert_eq!(withdrawn["status"], "delay");
+    assert_eq!(withdraw(0).await.status().as_u16(), 404);
+    let proofs = draft(&http, &base, &request_id).await["payload"]["approvals"].clone();
+    let with_withdrawal: Vec<_> = proofs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| !p["withdrawal"].is_null())
+        .collect();
+    assert_eq!(with_withdrawal.len(), 1);
+
+    // Below the threshold the request goes back to collecting approvals and cannot finalize.
+    let dropped = withdraw(1).await.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(dropped["status"], "pending_approvals");
+    assert_eq!(dropped["approvals_count"], 1);
+    let blocked = http
+        .post(format!("{base}/recovery/requests/{request_id}/finalize"))
+        .json(&finalize_body(&http, &base, owner_id, &request_id, &new_key).await)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status().as_u16(), 409);
+    remove_head(&pool, added_head).await;
+
+    // A guardian who withdrew can approve again, which replaces the withdrawn approval.
+    let again = approve(1).await.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(again["approvals_count"], 2);
+    assert_eq!(again["status"], "delay");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_threshold_below_the_protocol_minimum_is_refused() {
+    let pool = test_pool().await;
+    let http = reqwest::Client::new();
+    let base = server_url();
+    let (owner_id, owner_token) = seed_identity_session(&pool).await;
+    let (g1_id, _) = seed_identity_session(&pool).await;
+    let (g2_id, _) = seed_identity_session(&pool).await;
+    for guardian in [g1_id, g2_id] {
+        seed_friendship(&pool, owner_id, guardian).await;
+    }
+    let attempt = auth(
+        http.put(format!("{base}/me/recovery/guardians")),
+        &owner_token,
+    )
+    .json(&serde_json::json!({
+        "guardian_ids": [g1_id, g2_id],
+        "threshold": 1,
+        "chain_event": chain_sign::recovery_configured(owner_id, vec![g1_id, g2_id], 1).await,
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(attempt.status().as_u16(), 400);
 }

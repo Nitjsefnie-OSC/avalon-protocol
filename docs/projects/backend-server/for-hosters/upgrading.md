@@ -367,16 +367,60 @@ development databases with the node update. All nodes of a network update togeth
   `GET /identities/{id}/chain-head` returns it too.
 - **Passkeys:** registering a passkey no longer authors an event. The owner announces it with
   `GET /me/passkeys/{id}/announcement` and a signed `POST /me/passkeys/{id}/announce`.
-- **Recovery:** `identity.recovery_requested`, `identity.recovery_approved` and
-  `identity.recovery_cancelled` are public markers outside the owner's chain. A request names a new
-  Ed25519 key, each guardian signs an approval of exactly that request and key with their own key,
-  and `identity.recovered` embeds the approvals and is signed by the new key. Mirrors accept it only
-  with at least the threshold of valid approvals from the guardians in the owner's signed
-  `identity.recovery_configured`. Recovery revokes every earlier passkey and signing key.
-- **Not covered by mirrors:** the recovery delay and a veto (cancel) are enforced by the node that
-  finalizes, not provable by a mirror.
+- **Recovery:** `identity.recovery_requested` and `identity.recovery_approved` are public markers
+  outside the owner's chain; `identity.recovery_cancelled` is the owner's chained, signed veto.
+  The request is signed by the new Ed25519 key and names the `identity.recovery_configured` event
+  it relies on (its chain hash). Each guardian signs an approval of exactly that request, key,
+  request marker ledger entry, configuration and a position in their own chain, and
+  `identity.recovered` embeds the request and the approvals and is signed by the new key. Recovery
+  revokes every earlier passkey and signing key.
+- **Mirrors enforce the rules:** `identity.recovered` is valid only when the owner's chain below
+  it holds no cancel of that request (a cancel at the recovery's own position displaces it), the
+  request names the owner's current configuration, and at least the larger of the configured
+  threshold and the protocol minimum (2) of that configuration's guardians approved with a key their
+  own chain held at the approval's position and without a signed withdrawal. A guardian's withdrawal
+  is a signed `recovery_withdrawal` inside the approval proof; a withdrawn approval does not count.
+- **The delay is cosigned-head time:** the 48 hour delay is a protocol constant, not a setting
+  (`AVALON_RECOVERY_DELAY_HOURS` is gone). The request marker's ledger entry and the pinned
+  configuration must each have been covered by a cosigned tree head at least the delay before the
+  latest cosigned head of their shard. No node's clock is read, so an event that is not old enough
+  waits and applies once later heads arrive. A network of one witness or none counts a head on the
+  author's signature alone and advances only when its shard commits entries.
+- **Finalize:** the approvals are collected on the node that took the request. `GET
+  /recovery/requests/{id}/recovered-draft` returns the `approval_ids` and a `draft_hash`;
+  `POST .../finalize` takes the same `approval_ids` and answers 409 `RECOVERY_DRAFT_STALE` with the
+  current `draft_hash` when the approvals changed. Guardians withdraw with `POST
+  .../withdraw`; only the owner cancels, with a signed `chain_event`.
+- **Not guaranteed:** an attacker holding every active key of the owner can recover or cancel at
+  will, a colluding majority of the configured guardians can recover after the delay unless the
+  owner vetoes in time, and an owner with no witnesses cannot prove when the delay started beyond
+  the author's own signed heads.
 - **Binding:** a valid signature must also bind the state it changes. Profile, passkey and recovery
   events need the signer as subject and payload identity; a friend event must be authored by a
   party to the friendship; a guild event by its actor, and only a join-request approval or a member
   removal may name another member. `identity.recovered` is single-use: a request id or key that was
   already installed is refused.
+
+## Migration 0093: key validity by chain position, recovery delay and veto (destructive for clients)
+
+Whether a key may sign an event is now decided by the owner's accepted chain at the event's
+position, not by the projection when the event arrives: a key signs at `P` only when the chain below
+`P` added it and did not revoke it. An event whose chain below its position is not accepted yet
+waits (it is retried like any event waiting on a key), so delivery order no longer changes the
+outcome and a genuine older event is not refused after its key is revoked later. Approvals of a
+recovery carry the guardian's own chain position for the same reason.
+
+- **Migration 0093** adds `indexer_identity_signing_keys.inception`, claims chained events by chain
+  hash in `indexer_applied_events` (`claim_key`), adds the request, approval position and
+  withdrawal columns to the recovery tables and drops `recovery_requests.delay_ends_at`. Old
+  recovery events carry no request signature or approval positions, so reset development databases.
+- **Applied-event claim:** a chained event is claimed once by its chain hash, whichever shard
+  delivered it; a hostile node can no longer pre-claim a genuine event by reusing its id.
+- **Unsigned metadata:** the event time and id of a key event stay outside every signature and are
+  untrusted display data. Nothing decisional reads them; validity and the delay come from chain
+  position and cosigned tree heads.
+- **Clients:** `POST /recovery/requests/start` also returns `config_event_hash`; `finish` takes a
+  client-chosen `request_id` and the new key's `signature`; `approve` takes the guardian's `seq` and
+  `prev_hash` (their chain head plus one) and signs the request marker's `request_entry_hash` and
+  the `config_event_hash` that `GET /recovery/requests/{id}` returns once the marker is in a ledger
+  entry; `cancel` takes a signed `chain_event`.
