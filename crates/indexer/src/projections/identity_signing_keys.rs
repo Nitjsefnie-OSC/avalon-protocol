@@ -144,19 +144,23 @@ pub async fn revert_recovered(
     let payload: avalon_protocol::event_payloads::IdentityRecoveredPayload =
         serde_json::from_value(event.payload.clone())
             .map_err(|_| IndexError::Rejected("identity.recovered payload is malformed".into()))?;
-    for sql in [
+    sqlx::query(
         "UPDATE indexer_identity_signing_keys SET revoked_at = NULL \
          WHERE identity_id = $1 AND revoked_at = $2 AND signing_key_id <> $3",
+    )
+    .bind(identity_id)
+    .bind(event.timestamp)
+    .bind(payload.request_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
         "UPDATE indexer_identity_passkeys SET revoked_at = NULL \
-         WHERE identity_id = $1 AND revoked_at = $2 AND $3::uuid IS NOT NULL",
-    ] {
-        sqlx::query(sql)
-            .bind(identity_id)
-            .bind(event.timestamp)
-            .bind(payload.request_id)
-            .execute(&mut **tx)
-            .await?;
-    }
+         WHERE identity_id = $1 AND revoked_at = $2",
+    )
+    .bind(identity_id)
+    .bind(event.timestamp)
+    .execute(&mut **tx)
+    .await?;
     sqlx::query(
         "DELETE FROM indexer_identity_signing_keys WHERE identity_id = $1 AND signing_key_id = $2",
     )
