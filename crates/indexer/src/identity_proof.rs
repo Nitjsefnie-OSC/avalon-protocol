@@ -530,7 +530,7 @@ async fn attest_chain_event(
         .map_err(|_| reject("chained event payload is not canonical"))?;
     let wanted = hex::encode(stored);
     heads
-        .by_event_id(&mut **tx, event.id)
+        .by_event_id(tx, event.id)
         .await?
         .into_iter()
         .find(|e| e.kind == event.kind && e.payload_hash == wanted)
@@ -765,7 +765,7 @@ async fn verify_recovered(
         heads.ok_or_else(|| reject("this node has no cosigned head source for recoveries"))?;
     let config_entry = attest_chain_event(tx, heads, config_event).await?;
     let marker = heads
-        .by_entry_hash(&mut **tx, &payload.request_entry_hash)
+        .by_entry_hash(tx, &payload.request_entry_hash)
         .await?
         .ok_or_else(|| {
             IndexError::AwaitingKey("the recovery request entry is not held yet".into())
