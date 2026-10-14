@@ -253,10 +253,8 @@ impl PostgresIndexer {
         event: &ProtocolEvent,
         origin: Option<&EventOrigin>,
     ) -> Result<(), IndexError> {
-        // A chained event is claimed by its chain hash, which covers its content and position, so a
-        // hostile node cannot pre-claim a genuine event by reusing its client-chosen id. Any other
-        // event is claimed per (event id, shard): a relabelled copy only occupies the id on the shard
-        // that delivered it, never on the shard that carries the genuine event.
+        // A chained event is claimed by its chain hash, so a reused client-chosen id cannot pre-claim it;
+        // any other event is claimed per (event id, shard).
         let shard = origin.map_or("", |o| o.shard_id.as_str());
         let claim_key = match event
             .identity_chain

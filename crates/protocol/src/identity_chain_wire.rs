@@ -299,9 +299,8 @@ pub fn to_chained_event(
     })
 }
 
-/// The hashes of `identity.recovered` events the owner vetoed: a stored `identity.recovery_cancelled`
-/// for the same request id at the recovery's position or below it. A vetoed recovery is invalid, so it
-/// is dropped before the chain is resolved and can neither win a fork nor extend the chain.
+/// Hashes of `identity.recovered` events the owner vetoed: a cancel of the same request at or below
+/// their position. A vetoed recovery is dropped before the chain resolves.
 pub fn vetoed_recoveries(events: &[(ProtocolEvent, EventHash)]) -> BTreeSet<EventHash> {
     let request_of = |event: &ProtocolEvent| -> Option<uuid::Uuid> {
         event

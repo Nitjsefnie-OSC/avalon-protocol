@@ -3,9 +3,8 @@
 
 use time::{Duration, OffsetDateTime};
 
-/// How long a recovery request and the guardian configuration it relies on must have been covered by
-/// cosigned tree heads before `identity.recovered` is valid. Measured between cosigned heads, never
-/// against a node's own clock.
+/// How long the request and the configuration it relies on must have been covered by cosigned heads,
+/// measured between heads and never on a node's clock.
 pub const RECOVERY_DELAY: Duration = Duration::hours(48);
 
 /// The fewest guardian approvals any recovery needs, whatever threshold the owner configured.

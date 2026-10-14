@@ -1,9 +1,5 @@
-//! What cosigned tree heads say about a ledger entry: when the first cosigned head covered it and the
-//! latest cosigned head time of its shard. The recovery delay is measured between the two, never
-//! against a node's own clock.
-//!
-//! [`SqlHeadAttestor`] reads this node's own heads and the heads it mirrored; a head counts only when
-//! the witnesses that cosigned it reach the quorum. Tests plug in their own [`HeadAttestor`].
+//! When the first cosigned head covered a ledger entry and the latest cosigned head time of its shard.
+//! The recovery delay runs between the two, never on a node's clock; a head counts at a witness quorum.
 
 use std::sync::Arc;
 

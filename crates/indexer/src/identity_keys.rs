@@ -1,8 +1,5 @@
-//! An identity's signing keys as its accepted chain defines them, judged at a chain position.
-//!
-//! The verdict depends only on the owner's accepted chain and inception key, never on the order
-//! events arrived in or on the projection's current key rows. When the chain below the position is
-//! not accepted yet the answer is "wait", never a guess.
+//! An identity's signing keys judged at a chain position from its accepted chain and inception key.
+//! When the chain below the position is not accepted yet the answer is "wait", never a guess.
 
 use avalon_protocol::events::ProtocolEvent;
 use avalon_protocol::identity_chain_wire::event_hash;

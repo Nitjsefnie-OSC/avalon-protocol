@@ -68,9 +68,7 @@ fn identity_ref(identity_id: IdentityId, verb: &str) -> GlobalId {
 
 /// A guardian set must have at least one member and at most
 /// [`MAX_GUARDIANS`]; the threshold must be satisfiable and at least the protocol minimum
-/// (`MIN_RECOVERY_THRESHOLD..=guardian_count`). This is the only thing standing between "no single
-/// guardian can authorize recovery alone" being true and being an accident of whatever value a
-/// client happened to send.
+/// (`MIN_RECOVERY_THRESHOLD..=guardian_count`).
 pub(crate) fn validate_guardian_settings(
     guardian_count: usize,
     threshold: i32,
@@ -87,17 +85,13 @@ pub(crate) fn validate_guardian_settings(
     Ok(())
 }
 
-/// Whether a count of standing approvals clears the threshold captured at request time (never below
-/// the protocol minimum). Deliberately `>=`, not `==`: a guardian set can shrink between request and
-/// approval, and the threshold is frozen at request creation, so a later count could in principle
-/// jump past it in one step.
+/// Whether the standing approvals clear the threshold frozen at request time (never below the protocol
+/// minimum); `>=` because the count can jump past it in one step.
 pub(crate) fn meets_threshold(approvals_count: i64, threshold_at_request: i32) -> bool {
     approvals_count >= required_approvals(threshold_at_request) as i64
 }
 
-/// The core "may this request finalize right now" check: it must have collected its approvals (not
-/// still collecting, not cancelled or completed). Whether the delay has run is decided from cosigned
-/// tree heads when the event is verified, not from this node's clock.
+/// Whether a request may try to finalize: it has its approvals. The delay is verified from cosigned heads.
 pub(crate) fn guard_can_finalize(status: &str) -> Result<(), AppError> {
     match status {
         "completed" => Err(AppError::RecoveryAlreadyResolved),
@@ -648,9 +642,7 @@ pub struct RecoveryRequestResponse {
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = "date-time")]
     pub requested_at: OffsetDateTime,
-    /// The earliest the delay can have run: the time of the first cosigned tree head covering the
-    /// request marker plus the protocol delay. Null until such a head exists. Display only; the
-    /// delay is decided when `identity.recovered` is verified.
+    /// First covering cosigned head time plus the protocol delay; null until one exists. Display only.
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = "date-time")]
     pub delay_ends_at: Option<OffsetDateTime>,
@@ -920,9 +912,8 @@ fn decode_new_key(request: &RequestRow) -> Result<[u8; 32], AppError> {
         .ok_or(AppError::InvalidRecoveryKey)
 }
 
-/// The public key of `guardian`'s key `signing_key_id` at its chain position `seq` (extending
-/// `prev_hash`), judged from the guardian's accepted chain. A key not valid there, or a chain not
-/// accepted far enough, is an invalid signature.
+/// The guardian key at its chain position, judged from the guardian's accepted chain; a key not valid
+/// there, or a chain not accepted far enough, is an invalid signature.
 async fn guardian_key_at(
     state: &AppState,
     guardian: IdentityId,
@@ -957,9 +948,8 @@ fn verifies(key: &[u8; 32], bytes: &[u8], signature_b64: &str) -> bool {
     })
 }
 
-/// A guardian's approval: their own key, their chain position and a signature over
-/// `recovery_approval_signing_bytes` for this request, new key, request marker entry and
-/// configuration.
+/// A guardian's approval: their key, chain position and signature over the request, new key, marker
+/// entry and configuration.
 #[derive(Deserialize, ToSchema)]
 pub struct ApproveRecoveryRequest {
     pub signing_key_id: Uuid,
@@ -970,14 +960,8 @@ pub struct ApproveRecoveryRequest {
     pub signature: String,
 }
 
-/// `POST /recovery/requests/:id/approve` — a guardian's independent
-/// approval. Requires the caller to currently be one of the identity's
-/// guardians (not just at request time — a guardian removed since can no
-/// longer approve). The request marker must be in a ledger entry (which the
-/// approval signs) and the request must rely on the owner's current
-/// configuration. A guardian approving twice gets `AppError::AlreadyApproved`,
-/// unless they withdrew in between. Reaching [`meets_threshold`] transitions the
-/// row into the delay phase in the same transaction as this approval.
+/// `POST /recovery/requests/:id/approve` — a current guardian approves once the marker is in a ledger
+/// entry and the request relies on the owner's current configuration; a withdrawn guardian may redo it.
 #[utoipa::path(
     post,
     path = "/recovery/requests/{id}/approve",
@@ -1043,9 +1027,7 @@ pub async fn approve_request(
 
     let mut tx = state.pool.begin().await?;
 
-    // Re-check status inside the transaction against a row lock, the same way `finalize_request`
-    // does: a concurrent `cancel_request` could commit between the unlocked read above and here, and
-    // this approval would then overwrite that veto's status. Whichever commits first is authoritative.
+    // Re-check status under a row lock: a concurrent cancel must not be overwritten by this approval.
     let locked = sqlx::query(
         "SELECT status, threshold_at_request FROM recovery_requests WHERE id = $1 FOR UPDATE",
     )
@@ -1149,10 +1131,8 @@ pub struct WithdrawApprovalRequest {
     pub signature: String,
 }
 
-/// `POST /recovery/requests/:id/withdraw` — a guardian withdraws their own approval. The signed
-/// withdrawal rides inside the approval proof of the `identity.recovered` draft, and a withdrawn
-/// approval does not count. If it drops the request below its threshold the request goes back to
-/// collecting approvals.
+/// `POST /recovery/requests/:id/withdraw` — a guardian withdraws their approval; the signed withdrawal
+/// rides in the proof and a withdrawn approval does not count.
 #[utoipa::path(
     post,
     path = "/recovery/requests/{id}/withdraw",
@@ -1249,11 +1229,8 @@ pub struct CancelRecoveryRequest {
     pub chain_event: crate::identity_chain::ChainEventSignature,
 }
 
-/// `POST /recovery/requests/:id/cancel` — the owner's veto. The identity's own session cancels an
-/// in-flight attempt by authoring a chained `identity.recovery_cancelled` event signed by an active
-/// key of the owner; an `identity.recovered` for this request id is then invalid wherever the cancel
-/// sits at or below it in the owner's chain. A request already `completed`/`cancelled` cannot be
-/// cancelled again. A guardian's recourse is [`withdraw_approval`].
+/// `POST /recovery/requests/:id/cancel` — the owner's veto: a chained `identity.recovery_cancelled` that
+/// invalidates `identity.recovered` for this request. A guardian's recourse is [`withdraw_approval`].
 #[utoipa::path(
     post,
     path = "/recovery/requests/{id}/cancel",
@@ -1322,8 +1299,7 @@ pub async fn cancel_request(
     request_response(&state, request_id).await.map(Json)
 }
 
-/// The `identity.recovered` payload for a request and the ids of the approvals it carries: the new
-/// key, the signed request, its marker entry and every approval collected (a withdrawn one with its
+/// The `identity.recovered` payload and the ids of the approvals it carries (a withdrawn one with its
 /// withdrawal), ordered by guardian id so every party derives the same bytes.
 async fn recovered_payload(
     conn: &mut sqlx::PgConnection,
@@ -1477,13 +1453,8 @@ pub struct FinalizeRecoveryRequest {
     pub approval_ids: Vec<Uuid>,
 }
 
-/// `POST /recovery/requests/:id/finalize` — deliberately public and
-/// idempotent: it grants nothing beyond what the approvals and the cosigned
-/// heads covering the request already authorized, so there is no meaningful
-/// caller identity to check. The delay is not read from this node's clock:
-/// the indexer verifies it from cosigned tree heads when the event is applied,
-/// and finalize answers `RECOVERY_NOT_READY_TO_FINALIZE` until it has run.
-/// Calling it on an already-`completed` request returns the current state.
+/// `POST /recovery/requests/:id/finalize` — public and idempotent. The delay is verified from cosigned
+/// heads when the event is applied; until it has run this answers `RECOVERY_NOT_READY_TO_FINALIZE`.
 #[utoipa::path(
     post,
     path = "/recovery/requests/{id}/finalize",

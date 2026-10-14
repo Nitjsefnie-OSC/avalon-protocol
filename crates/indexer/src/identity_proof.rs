@@ -661,14 +661,8 @@ fn guardian_key(
     }))
 }
 
-/// Checks `identity.recovered`. It is signed by the new key it introduces (key id = the request id) and
-/// embeds the request, which that key signed and which names the owner's current
-/// `identity.recovery_configured` event. It is valid only when, in the owner's accepted chain below it,
-/// no owner-signed `identity.recovery_cancelled` names the request; the configuration and the request
-/// marker's ledger entry were covered by cosigned tree heads a full recovery delay before the latest
-/// one (never by a node's clock); and at least the threshold of the configured guardians approved this
-/// request, key, marker entry and configuration, each at a position of their own chain where their key
-/// was valid, without a signed withdrawal. A chain or head not known yet makes it wait, not fail.
+/// Checks `identity.recovered`: new-key signature, no owner cancel, the current configuration and request
+/// marker covered a delay by cosigned heads, and threshold approvals valid at their guardians' positions.
 async fn verify_recovered(
     tx: &mut Transaction<'_, Postgres>,
     event: &ProtocolEvent,

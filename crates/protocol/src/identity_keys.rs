@@ -1,8 +1,5 @@
-//! Which signing keys of an identity were valid at a position of its chain.
-//!
-//! Validity is a function of the identity's accepted chain alone, never of arrival order, a node's
-//! projection state or an event's (unsigned) time: a key signs the event at position `P` only if the
-//! chain below `P` added it and did not revoke it. Pure logic, no I/O.
+//! Which signing keys of an identity were valid at a position of its chain: a key signs the event at
+//! `P` only if the chain below `P` added it and did not revoke it. Pure logic, no I/O.
 
 use base64::Engine as _;
 use uuid::Uuid;
@@ -22,9 +19,8 @@ pub struct KeyRecord {
     pub revoked_seq: Option<u64>,
 }
 
-/// The key records an accepted chain yields, given the identity's inception keys. A device grant adds a
-/// key at its position, a revocation ends one, and `identity.recovered` ends every key then active and
-/// adds its new one (key id = request id) at its own position.
+/// The key records an accepted chain yields: a grant adds a key, a revocation ends one, and
+/// `identity.recovered` ends every active key and adds its new one (key id = request id).
 pub fn key_records(inception: &[(Uuid, [u8; 32])], accepted: &[ProtocolEvent]) -> Vec<KeyRecord> {
     let mut records: Vec<KeyRecord> = inception
         .iter()
@@ -110,9 +106,8 @@ pub enum KeyAt {
     Unknown,
 }
 
-/// Judges `signing_key_id` at `position`, the `seq` of the event it signs (or, for a guardian's
-/// approval, the `seq` its next event would take): valid iff the chain below `position` added it and
-/// did not revoke it. The event at `position` itself never counts, so a key can revoke itself.
+/// Judges a key at `position` (the signed event's `seq`; a guardian's next `seq` for an approval): valid
+/// iff the chain below it added and did not revoke it, so a key can revoke itself.
 pub fn key_at(records: &[KeyRecord], signing_key_id: Uuid, position: u64) -> KeyAt {
     let Some(record) = records
         .iter()
