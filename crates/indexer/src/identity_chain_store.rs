@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use avalon_protocol::events::ProtocolEvent;
 use avalon_protocol::identity_chain::{ChainOutcome, ChainedEvent, ClockSkewBounds, EventHash};
 use avalon_protocol::identity_chain_wire::{
-    chain_owner, event_hash, resolve_identity_chain, to_chained_event, ChainEventError,
+    chain_owner, event_hash, resolve_identity_chain, to_chained_event, vetoed_recoveries,
+    ChainEventError,
 };
 use avalon_protocol::identity_id::IdentityId;
 use sqlx::{PgExecutor, Postgres, Row, Transaction};
@@ -148,15 +149,23 @@ async fn load(
 }
 
 fn outcome_of(stored: &[Stored]) -> ChainOutcome {
-    let recovery: BTreeSet<EventHash> = stored
+    // A recovery the owner cancelled at or below its position is invalid: it is dropped before
+    // resolution, so it neither wins a fork nor extends the chain.
+    let hashed: Vec<(ProtocolEvent, EventHash)> = stored
+        .iter()
+        .map(|s| (s.event.clone(), s.chained.event_hash))
+        .collect();
+    let vetoed = vetoed_recoveries(&hashed);
+    let live: Vec<&Stored> = stored
+        .iter()
+        .filter(|s| !vetoed.contains(&s.chained.event_hash))
+        .collect();
+    let recovery: BTreeSet<EventHash> = live
         .iter()
         .filter(|s| s.event.kind == "identity.recovered")
         .map(|s| s.chained.event_hash)
         .collect();
-    resolve_identity_chain(
-        stored.iter().map(|s| s.chained.clone()).collect(),
-        &recovery,
-    )
+    resolve_identity_chain(live.iter().map(|s| s.chained.clone()).collect(), &recovery)
 }
 
 fn accepted_of<'a>(stored: &'a [Stored], outcome: &ChainOutcome) -> Vec<&'a Stored> {

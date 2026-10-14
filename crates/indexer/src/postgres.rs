@@ -17,11 +17,14 @@
 //!   (`register_finish`/`update_profile`), which call this instead of
 //!   writing `profiles` themselves.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use avalon_protocol::events::ProtocolEvent;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::attestation_proof;
+use crate::head_attestor::HeadAttestor;
 use crate::identity_chain_store::{self, Recorded};
 use crate::identity_proof::{self, EventOrigin, Verified};
 use crate::projections::{
@@ -75,6 +78,7 @@ pub struct RebuildOutcome {
 pub struct PostgresIndexer {
     pool: PgPool,
     local_origin: Option<EventOrigin>,
+    heads: Option<Arc<dyn HeadAttestor>>,
 }
 
 impl PostgresIndexer {
@@ -82,7 +86,15 @@ impl PostgresIndexer {
         Self {
             pool,
             local_origin: None,
+            heads: None,
         }
+    }
+
+    /// Sets where cosigned tree heads are read from, which `identity.recovered` needs to prove
+    /// its delay. Without it every recovery is refused.
+    pub fn with_head_attestor(mut self, heads: Arc<dyn HeadAttestor>) -> Self {
+        self.heads = Some(heads);
+        self
     }
 
     /// Sets the network and shard of events this node authors itself, which
@@ -236,14 +248,26 @@ impl PostgresIndexer {
         event: &ProtocolEvent,
         origin: Option<&EventOrigin>,
     ) -> Result<(), IndexError> {
-        // The claim is per (event id, shard): a relabelled copy can only occupy the id on the
-        // shard that delivered it, never on the shard that carries the genuine event.
+        // A chained event is claimed by its chain hash, which covers its content and position, so a
+        // hostile node cannot pre-claim a genuine event by reusing its client-chosen id. Any other
+        // event is claimed per (event id, shard): a relabelled copy only occupies the id on the shard
+        // that delivered it, never on the shard that carries the genuine event.
+        let shard = origin.map_or("", |o| o.shard_id.as_str());
+        let claim_key = match event
+            .identity_chain
+            .as_ref()
+            .and_then(|_| avalon_protocol::identity_chain_wire::event_hash(event).ok())
+        {
+            Some(hash) => format!("chain:{}", hex::encode(hash)),
+            None => format!("{}:{shard}", event.id),
+        };
         let claimed = sqlx::query(
-            "INSERT INTO indexer_applied_events (event_id, shard_id) VALUES ($1, $2) \
+            "INSERT INTO indexer_applied_events (event_id, shard_id, claim_key) VALUES ($1, $2, $3) \
              ON CONFLICT DO NOTHING RETURNING event_id",
         )
         .bind(event.id)
-        .bind(origin.map_or("", |o| o.shard_id.as_str()))
+        .bind(shard)
+        .bind(&claim_key)
         .fetch_optional(&mut **tx)
         .await?;
 
@@ -252,7 +276,7 @@ impl PostgresIndexer {
         }
 
         // Proof comes before the identity chain: a refused event must not reach it either.
-        let verified = identity_proof::verify(tx, event, origin).await?;
+        let verified = identity_proof::verify(tx, event, origin, self.heads.as_deref()).await?;
 
         // Chained events are recorded and resolved first; only `profile.updated`
         // is projected through the resolved chain (see `apply_profile_chained`).
@@ -269,6 +293,15 @@ impl PostgresIndexer {
                 newly_accepted,
                 accepted_events,
             } => {
+                // A recovery the owner's veto displaced no longer stands: its keys come back.
+                for gone in displaced.iter().filter(|e| e.kind == "identity.recovered") {
+                    if let Some(owner) = avalon_protocol::identity_chain_wire::chain_owner(gone) {
+                        identity_signing_keys::revert_recovered(tx, gone, owner).await?;
+                    }
+                }
+                if event.kind == "identity.recovered" && !accepted {
+                    return Ok(());
+                }
                 if event.kind == "profile.updated" {
                     apply_profile_chained(
                         tx,

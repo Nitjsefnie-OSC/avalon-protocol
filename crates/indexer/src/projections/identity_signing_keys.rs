@@ -26,7 +26,10 @@ pub enum SigningKeyWrite {
         identity_id: IdentityId,
         public_key: Vec<u8>,
         label: Option<String>,
+        /// Display only: an unsigned event time, never read by a validity decision.
         added_at: OffsetDateTime,
+        /// The identity's own first key, which its chain does not carry.
+        inception: bool,
     },
     Revoked {
         signing_key_id: Uuid,
@@ -61,6 +64,8 @@ pub fn decode(event: &ProtocolEvent) -> Option<SigningKeyWrite> {
                 public_key,
                 label: added.device_label,
                 added_at: event.timestamp,
+                inception: added.kind
+                    == avalon_protocol::event_payloads::SIGNING_KEY_KIND_INCEPTION,
             })
         }
         "identity.signing_key_revoked" => {
@@ -123,9 +128,43 @@ pub async fn apply_recovered(
             public_key,
             label: payload.device_label,
             added_at: event.timestamp,
+            inception: false,
         },
     )
     .await
+}
+
+/// Undoes [`apply_recovered`] for a recovery the owner's veto displaced: the keys and passkeys it
+/// revoked are active again and its new key is gone.
+pub async fn revert_recovered(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &ProtocolEvent,
+    identity_id: IdentityId,
+) -> Result<(), IndexError> {
+    let payload: avalon_protocol::event_payloads::IdentityRecoveredPayload =
+        serde_json::from_value(event.payload.clone())
+            .map_err(|_| IndexError::Rejected("identity.recovered payload is malformed".into()))?;
+    for sql in [
+        "UPDATE indexer_identity_signing_keys SET revoked_at = NULL \
+         WHERE identity_id = $1 AND revoked_at = $2 AND signing_key_id <> $3",
+        "UPDATE indexer_identity_passkeys SET revoked_at = NULL \
+         WHERE identity_id = $1 AND revoked_at = $2 AND $3::uuid IS NOT NULL",
+    ] {
+        sqlx::query(sql)
+            .bind(identity_id)
+            .bind(event.timestamp)
+            .bind(payload.request_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query(
+        "DELETE FROM indexer_identity_signing_keys WHERE identity_id = $1 AND signing_key_id = $2",
+    )
+    .bind(identity_id)
+    .bind(payload.request_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 pub async fn apply(
@@ -139,6 +178,7 @@ pub async fn apply(
             public_key,
             label,
             added_at,
+            inception,
         } => {
             // Keys are unique per (identity, key id), so another identity cannot occupy this id.
             // A re-delivery is idempotent; one that would swap the public key is refused, as is
@@ -160,8 +200,8 @@ pub async fn apply(
             }
             let written = sqlx::query(
                 "INSERT INTO indexer_identity_signing_keys AS k \
-                 (signing_key_id, identity_id, public_key, label, added_at, revoked_at) \
-                 VALUES ($1, $2, $3, $4, $5, \
+                 (signing_key_id, identity_id, public_key, label, added_at, inception, revoked_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, \
                          (SELECT revoked_at FROM indexer_identity_signing_key_revocations \
                           WHERE identity_id = $2 AND signing_key_id = $1)) \
                  ON CONFLICT (identity_id, signing_key_id) DO UPDATE SET \
@@ -173,6 +213,7 @@ pub async fn apply(
             .bind(public_key)
             .bind(label)
             .bind(added_at)
+            .bind(inception)
             .execute(&mut **tx)
             .await?;
             if written.rows_affected() == 0 {
@@ -323,6 +364,7 @@ mod tests {
                 public_key: vec![0, 0, 0],
                 label: Some("Pixel 9".to_string()),
                 added_at: source_event.timestamp,
+                inception: false,
             }
         );
     }

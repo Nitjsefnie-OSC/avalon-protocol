@@ -14,25 +14,34 @@ use avalon_protocol::event_payloads::{
     FriendRequestedPayload, GuildMemberAddedPayload, GuildMemberRemovedPayload,
     GuildMembershipReversedPayload, IdentityCreatedPayload, IdentityRecoveredPayload,
     IdentityRecoveryConfiguredPayload, IdentitySigningKeyAddedPayload,
-    IdentitySigningKeyRevokedPayload, SIGNING_KEY_KIND_DEVICE_GRANT, SIGNING_KEY_KIND_INCEPTION,
+    IdentitySigningKeyRevokedPayload, RecoveryApprovalProof, SIGNING_KEY_KIND_DEVICE_GRANT,
+    SIGNING_KEY_KIND_INCEPTION,
 };
 use avalon_protocol::events::ProtocolEvent;
 use avalon_protocol::identity_chain_wire::{
-    chain_owner, needs_author_signature, parse_hash, signer_of, verify_author_signature,
+    chain_owner, embed_position, event_hash, needs_author_signature, parse_hash, signer_of,
+    verify_author_signature,
 };
 use avalon_protocol::identity_id::{
     device_grant_approval_signing_bytes, display_name_permitted, identity_created_signing_bytes,
-    recovery_approval_signing_bytes, signing_key_revoked_signing_bytes, IdentityId,
+    recovery_approval_signing_bytes, recovery_request_signing_bytes,
+    recovery_withdrawal_signing_bytes, signing_key_revoked_signing_bytes, IdentityId,
+    RecoveryApprovalBinding,
 };
+use avalon_protocol::identity_keys::KeyAt;
 use avalon_protocol::ids::GlobalId;
+use avalon_protocol::ledger_entry::payload_hash;
+use avalon_protocol::recovery_rules::{delay_elapsed, parse_hex32, required_approvals};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use std::collections::BTreeSet;
 
-use crate::{identity_chain_store, IndexError};
+use crate::head_attestor::{EntryAttestation, HeadAttestor};
+use crate::identity_keys::{self, AcceptedChain};
+use crate::IndexError;
 
 /// Where an event came from: the ledger stream (network and shard) it was read from, and whether
 /// this node authored that stream itself.
@@ -184,53 +193,6 @@ fn signed_position(event: &ProtocolEvent) -> Result<(u64, Option<[u8; 32]>), Ind
     Ok((position.seq, prev_hash))
 }
 
-/// A key of an identity as the projection knows it.
-enum KeyState {
-    Active([u8; 32]),
-    Revoked,
-    Unknown,
-}
-
-async fn key_state(
-    tx: &mut Transaction<'_, Postgres>,
-    identity_id: IdentityId,
-    signing_key_id: Uuid,
-) -> Result<KeyState, IndexError> {
-    let row = sqlx::query(
-        "SELECT public_key, revoked_at IS NOT NULL AS revoked FROM indexer_identity_signing_keys \
-         WHERE identity_id = $1 AND signing_key_id = $2",
-    )
-    .bind(identity_id)
-    .bind(signing_key_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(row) = row else {
-        return Ok(KeyState::Unknown);
-    };
-    if row.try_get::<bool, _>("revoked")? {
-        return Ok(KeyState::Revoked);
-    }
-    let raw: Vec<u8> = row.try_get("public_key")?;
-    Ok(<[u8; 32]>::try_from(raw).map_or(KeyState::Revoked, KeyState::Active))
-}
-
-/// The active key a proof names. A key not projected yet defers the event (it may still arrive,
-/// possibly from another shard); a revoked one refuses it.
-async fn signer_key(
-    tx: &mut Transaction<'_, Postgres>,
-    identity_id: IdentityId,
-    signing_key_id: Uuid,
-    role: &str,
-) -> Result<[u8; 32], IndexError> {
-    match key_state(tx, identity_id, signing_key_id).await? {
-        KeyState::Active(key) => Ok(key),
-        KeyState::Revoked => Err(reject(format!("{role} key is revoked"))),
-        KeyState::Unknown => Err(IndexError::AwaitingKey(format!(
-            "{role} key is not projected for this identity yet"
-        ))),
-    }
-}
-
 /// The network a key event's signature is bound to: the network of the stream it was read from.
 fn key_event_network(origin: Option<&EventOrigin>) -> Result<&str, IndexError> {
     origin
@@ -278,6 +240,21 @@ async fn require_ticket_key(
     }
 }
 
+/// The public key `signing_key_id` of `identity_id` had at the chain position `seq` (extending
+/// `prev_hash`), judged from the identity's accepted chain. Waits while the chain below is incomplete.
+async fn judge_signer(
+    tx: &mut Transaction<'_, Postgres>,
+    identity_id: IdentityId,
+    signing_key_id: Uuid,
+    seq: u64,
+    prev_hash: Option<&[u8; 32]>,
+    role: &str,
+) -> Result<[u8; 32], IndexError> {
+    let chain = identity_keys::load(tx, identity_id).await?;
+    chain.require_extends(seq, prev_hash)?;
+    identity_keys::require_valid(chain.key_at(signing_key_id, seq)?, role)
+}
+
 async fn verify_key_added(
     tx: &mut Transaction<'_, Postgres>,
     event: &ProtocolEvent,
@@ -307,17 +284,19 @@ async fn verify_key_added(
                 return Err(reject("device grant carries no approval signature"));
             };
             let signature = decode_signature(signature)?;
-            let approver = signer_key(
-                tx,
-                added.identity_id,
-                added.approved_by_signing_key_id,
-                "approving",
-            )
-            .await?;
             if added.signing_key_id != grant_id {
                 return Err(reject("device key id is not the id of the grant"));
             }
             let (seq, prev_hash) = signed_position(event)?;
+            let approver = judge_signer(
+                tx,
+                added.identity_id,
+                added.approved_by_signing_key_id,
+                seq,
+                prev_hash.as_ref(),
+                "approving",
+            )
+            .await?;
             let bytes = device_grant_approval_signing_bytes(
                 network_id,
                 grant_id,
@@ -356,14 +335,16 @@ async fn verify_key_revoked(
     require_issuer_is(event, revoked.identity_id)?;
     let network_id = key_event_network(origin)?;
     let signature = decode_signature(&revoked.signature)?;
-    let revoker = signer_key(
+    let (seq, prev_hash) = signed_position(event)?;
+    let revoker = judge_signer(
         tx,
         revoked.identity_id,
         revoked.revoked_by_signing_key_id,
+        seq,
+        prev_hash.as_ref(),
         "revoking",
     )
     .await?;
-    let (seq, prev_hash) = signed_position(event)?;
     let bytes = signing_key_revoked_signing_bytes(
         network_id,
         &revoked.identity_id,
@@ -492,7 +473,8 @@ async fn verify_author(
         .and_then(|p| p.signing_key_id)
         .ok_or_else(|| reject(format!("{} carries no author signature", event.kind)))?;
     require_binding(event, signer)?;
-    let key = signer_key(tx, signer, key_id, "authoring").await?;
+    let (seq, prev_hash) = signed_position(event)?;
+    let key = judge_signer(tx, signer, key_id, seq, prev_hash.as_ref(), "authoring").await?;
     match verify_author_signature(event, network_id, &key) {
         Ok(true) => Ok(()),
         Ok(false) => Err(reject(format!(
@@ -506,14 +488,182 @@ async fn verify_author(
     }
 }
 
-/// Checks `identity.recovered`: it is signed by the new key it introduces (key id = the request
-/// id), and embeds valid approvals of exactly this request and key from at least the threshold of
-/// the guardians in the owner's accepted `identity.recovery_configured`. Guardians sign only
-/// these approvals, never an event of the owner's chain.
+/// A proof's position hash: absent, or 64 lowercase hex characters.
+fn position_hash(prev_hash: &Option<String>) -> Option<Option<[u8; 32]>> {
+    match prev_hash {
+        None => Some(None),
+        Some(text) => parse_hex32(text).map(Some),
+    }
+}
+
+/// The identity id in an `identity:<id>:...` global id string.
+fn identity_of_ref(text: &str) -> Option<IdentityId> {
+    let mut parts = text.splitn(4, ':');
+    if parts.next()? != "identity" {
+        return None;
+    }
+    parts.next()?.parse().ok()
+}
+
+/// The ledger entry an accepted chain event sits in: the entry of its id whose payload hash is that of
+/// the event's stored payload (the payload with its chain position embedded).
+async fn attest_chain_event(
+    tx: &mut Transaction<'_, Postgres>,
+    heads: &dyn HeadAttestor,
+    event: &ProtocolEvent,
+) -> Result<EntryAttestation, IndexError> {
+    let position = event
+        .identity_chain
+        .as_ref()
+        .ok_or_else(|| reject("a chained event carries its position"))?;
+    let stored = payload_hash(&embed_position(&event.payload, position))
+        .map_err(|_| reject("chained event payload is not canonical"))?;
+    let wanted = hex::encode(stored);
+    heads
+        .by_event_id(&mut **tx, event.id)
+        .await?
+        .into_iter()
+        .find(|e| e.kind == event.kind && e.payload_hash == wanted)
+        .ok_or_else(|| {
+            IndexError::AwaitingKey(format!("{} is not in a ledger entry yet", event.kind))
+        })
+}
+
+/// Waits until cosigned heads cover the entry and the latest cosigned head is a full recovery delay
+/// later than the first covering one.
+fn require_old_enough(entry: &EntryAttestation, what: &str) -> Result<(), IndexError> {
+    match (entry.covered_at, entry.reference_at) {
+        (Some(covered), Some(latest)) if delay_elapsed(covered, latest) => Ok(()),
+        (Some(_), Some(_)) => Err(IndexError::AwaitingKey(format!(
+            "{what} is not older than the recovery delay yet"
+        ))),
+        _ => Err(IndexError::AwaitingKey(format!(
+            "{what} is not covered by a cosigned tree head yet"
+        ))),
+    }
+}
+
+/// What a recovery's guardian approvals must all bind.
+struct ApprovalContext<'a> {
+    network_id: &'a str,
+    owner: IdentityId,
+    request_id: Uuid,
+    new_key: &'a [u8; 32],
+    request_entry_hash: &'a [u8; 32],
+    config_event_hash: &'a [u8; 32],
+}
+
+enum Counted {
+    Yes,
+    No,
+    Awaiting,
+}
+
+/// Whether the guardian's key signed the approval at a position its own accepted chain extends, and no
+/// valid withdrawal rides with it. A guardian chain not accepted far enough yet leaves it undecided.
+async fn check_approval(
+    tx: &mut Transaction<'_, Postgres>,
+    ctx: &ApprovalContext<'_>,
+    proof: &RecoveryApprovalProof,
+) -> Result<Counted, IndexError> {
+    let Some(prev) = position_hash(&proof.prev_hash) else {
+        return Ok(Counted::No);
+    };
+    let chain = match identity_keys::load(tx, proof.guardian_id).await {
+        Ok(chain) => chain,
+        Err(IndexError::AwaitingKey(_)) => return Ok(Counted::Awaiting),
+        Err(other) => return Err(other),
+    };
+    let Some(key) = guardian_key(&chain, proof.signing_key_id, proof.seq, prev.as_ref())? else {
+        return Ok(Counted::Awaiting);
+    };
+    let Some(key) = key else {
+        return Ok(Counted::No);
+    };
+    let bytes = recovery_approval_signing_bytes(
+        ctx.network_id,
+        &ctx.owner,
+        ctx.request_id,
+        &proof.guardian_id,
+        proof.signing_key_id,
+        ctx.new_key,
+        &RecoveryApprovalBinding {
+            request_entry_hash: ctx.request_entry_hash,
+            config_event_hash: ctx.config_event_hash,
+            guardian_seq: proof.seq,
+            guardian_prev_hash: prev.as_ref(),
+        },
+    );
+    let signed = decode_signature(&proof.signature)
+        .is_ok_and(|signature| verify_with_key(&key, &bytes, &signature));
+    if !signed {
+        return Ok(Counted::No);
+    }
+    let Some(withdrawal) = &proof.withdrawal else {
+        return Ok(Counted::Yes);
+    };
+    let Some(withdrawn_prev) = position_hash(&withdrawal.prev_hash) else {
+        return Ok(Counted::Yes);
+    };
+    let Some(withdrawer) = guardian_key(
+        &chain,
+        withdrawal.signing_key_id,
+        withdrawal.seq,
+        withdrawn_prev.as_ref(),
+    )?
+    else {
+        return Ok(Counted::Awaiting);
+    };
+    let Some(withdrawer) = withdrawer else {
+        return Ok(Counted::Yes);
+    };
+    let bytes = recovery_withdrawal_signing_bytes(
+        ctx.network_id,
+        &ctx.owner,
+        ctx.request_id,
+        &proof.guardian_id,
+        withdrawal.signing_key_id,
+        withdrawal.seq,
+        withdrawn_prev.as_ref(),
+    );
+    let withdrawn = decode_signature(&withdrawal.signature)
+        .is_ok_and(|signature| verify_with_key(&withdrawer, &bytes, &signature));
+    Ok(if withdrawn { Counted::No } else { Counted::Yes })
+}
+
+/// The guardian's key at a signed position: `Ok(None)` while the guardian's chain is not accepted far
+/// enough, `Ok(Some(None))` when the position or key is not valid, `Ok(Some(Some(key)))` when it is.
+fn guardian_key(
+    chain: &AcceptedChain,
+    signing_key_id: Uuid,
+    seq: u64,
+    prev_hash: Option<&[u8; 32]>,
+) -> Result<Option<Option<[u8; 32]>>, IndexError> {
+    match chain.require_extends(seq, prev_hash) {
+        Ok(()) => {}
+        Err(IndexError::AwaitingKey(_)) => return Ok(None),
+        Err(IndexError::Rejected(_)) => return Ok(Some(None)),
+        Err(other) => return Err(other),
+    }
+    Ok(Some(match chain.key_at(signing_key_id, seq)? {
+        KeyAt::Valid(key) => Some(key),
+        _ => None,
+    }))
+}
+
+/// Checks `identity.recovered`. It is signed by the new key it introduces (key id = the request id) and
+/// embeds the request, which that key signed and which names the owner's current
+/// `identity.recovery_configured` event. It is valid only when, in the owner's accepted chain below it,
+/// no owner-signed `identity.recovery_cancelled` names the request; the configuration and the request
+/// marker's ledger entry were covered by cosigned tree heads a full recovery delay before the latest
+/// one (never by a node's clock); and at least the threshold of the configured guardians approved this
+/// request, key, marker entry and configuration, each at a position of their own chain where their key
+/// was valid, without a signed withdrawal. A chain or head not known yet makes it wait, not fail.
 async fn verify_recovered(
     tx: &mut Transaction<'_, Postgres>,
     event: &ProtocolEvent,
     origin: Option<&EventOrigin>,
+    heads: Option<&dyn HeadAttestor>,
 ) -> Result<(), IndexError> {
     let network_id = key_event_network(origin)?;
     let owner = chain_owner(event).ok_or_else(|| reject("issuer is not an identity"))?;
@@ -534,10 +684,34 @@ async fn verify_recovered(
         ));
     }
 
-    let accepted = identity_chain_store::accepted_events(tx, owner).await?;
+    let request = &payload.request;
+    let config_hash = parse_hex32(&request.config_event_hash)
+        .ok_or_else(|| reject("recovery request names a malformed configuration hash"))?;
+    let entry_hash = parse_hex32(&payload.request_entry_hash)
+        .ok_or_else(|| reject("recovery request entry hash is malformed"))?;
+    if request.request_id != payload.request_id
+        || request.new_signing_public_key != payload.new_signing_public_key
+    {
+        return Err(reject("the embedded request is not this recovery's"));
+    }
+    let request_bytes = recovery_request_signing_bytes(
+        network_id,
+        &owner,
+        payload.request_id,
+        &new_key,
+        &config_hash,
+    );
+    if !decode_signature(&request.signature)
+        .is_ok_and(|signature| verify_with_key(&new_key, &request_bytes, &signature))
+    {
+        return Err(reject("recovery request is not signed by the new key"));
+    }
+
+    let (seq, prev_hash) = signed_position(event)?;
+    let chain = identity_keys::load(tx, owner).await?;
     // A recovery is single-use: its request id and its new key can never be installed twice, so
     // a stolen recovery key cannot replay an old recovered at a later head.
-    let consumed = accepted.iter().any(|e| {
+    let consumed = chain.events.iter().any(|e| {
         e.id != event.id
             && e.kind == "identity.recovered"
             && e.payload.get("request_id") == Some(&serde_json::json!(payload.request_id))
@@ -551,7 +725,7 @@ async fn verify_recovered(
     .bind(new_key.as_slice())
     .fetch_one(&mut **tx)
     .await?;
-    if key_known && accepted.iter().any(|e| e.id == event.id) {
+    if key_known && chain.events.iter().any(|e| e.id == event.id) {
         // The same recovery redelivered from another shard.
         return Ok(());
     }
@@ -560,51 +734,84 @@ async fn verify_recovered(
             "identity.recovered reuses a consumed recovery request or an existing key",
         ));
     }
-    let configured: IdentityRecoveryConfiguredPayload = accepted
-        .iter()
-        .rev()
-        .find(|e| e.kind == "identity.recovery_configured")
-        .and_then(|e| serde_json::from_value(e.payload.clone()).ok())
+    chain.require_extends(seq, prev_hash.as_ref())?;
+
+    let vetoed = chain.below(seq).any(|e| {
+        e.kind == "identity.recovery_cancelled"
+            && e.payload.get("request_id") == Some(&serde_json::json!(payload.request_id))
+    });
+    if vetoed {
+        return Err(reject("the owner cancelled this recovery request"));
+    }
+    let config_event = chain
+        .below(seq)
+        .filter(|e| e.kind == "identity.recovery_configured")
+        .last()
+        .ok_or_else(|| reject("the owner has no recovery configuration below the recovery"))?;
+    if event_hash(config_event).ok() != Some(config_hash) {
+        return Err(reject(
+            "the request relies on a configuration that is not the owner's current one",
+        ));
+    }
+    let configured: IdentityRecoveryConfiguredPayload =
+        serde_json::from_value(config_event.payload.clone())
+            .map_err(|_| reject("recovery configuration is malformed"))?;
+
+    let heads =
+        heads.ok_or_else(|| reject("this node has no cosigned head source for recoveries"))?;
+    let config_entry = attest_chain_event(tx, heads, config_event).await?;
+    let marker = heads
+        .by_entry_hash(&mut **tx, &payload.request_entry_hash)
+        .await?
         .ok_or_else(|| {
-            IndexError::AwaitingKey("the recovery configuration is not projected yet".to_string())
+            IndexError::AwaitingKey("the recovery request entry is not held yet".into())
         })?;
+    let marker_hash = payload_hash(
+        &serde_json::to_value(request).map_err(|_| reject("request is not serializable"))?,
+    )
+    .map_err(|_| reject("request payload is not canonical"))?;
+    if marker.kind != "identity.recovery_requested"
+        || marker.payload_hash != hex::encode(marker_hash)
+        || identity_of_ref(&marker.subject) != Some(owner)
+    {
+        return Err(reject(
+            "the request entry is not this recovery's request marker",
+        ));
+    }
+
+    let ctx = ApprovalContext {
+        network_id,
+        owner,
+        request_id: payload.request_id,
+        new_key: &new_key,
+        request_entry_hash: &entry_hash,
+        config_event_hash: &config_hash,
+    };
     let mut approved = BTreeSet::new();
-    let mut awaiting_key = false;
-    for approval in &payload.approvals {
-        if !configured.guardian_ids.contains(&approval.guardian_id)
-            || approved.contains(&approval.guardian_id)
+    let mut awaiting = false;
+    for proof in &payload.approvals {
+        if !configured.guardian_ids.contains(&proof.guardian_id)
+            || approved.contains(&proof.guardian_id)
         {
             continue;
         }
-        let key = match key_state(tx, approval.guardian_id, approval.signing_key_id).await? {
-            KeyState::Active(key) => key,
-            KeyState::Revoked => continue,
-            KeyState::Unknown => {
-                awaiting_key = true;
-                continue;
+        match check_approval(tx, &ctx, proof).await? {
+            Counted::Yes => {
+                approved.insert(proof.guardian_id);
             }
-        };
-        let bytes = recovery_approval_signing_bytes(
-            network_id,
-            &owner,
-            payload.request_id,
-            &approval.guardian_id,
-            approval.signing_key_id,
-            &new_key,
-        );
-        let valid = decode_signature(&approval.signature)
-            .is_ok_and(|signature| verify_with_key(&key, &bytes, &signature));
-        if valid {
-            approved.insert(approval.guardian_id);
+            Counted::No => {}
+            Counted::Awaiting => awaiting = true,
         }
     }
-    if (approved.len() as i64) < i64::from(configured.threshold.max(1)) {
-        return Err(if awaiting_key {
-            IndexError::AwaitingKey("a guardian key is not projected yet".to_string())
+    if approved.len() < required_approvals(configured.threshold) {
+        return Err(if awaiting {
+            IndexError::AwaitingKey("a guardian chain is not accepted far enough yet".to_string())
         } else {
             reject("identity.recovered carries fewer valid guardian approvals than the threshold")
         });
     }
+    require_old_enough(&config_entry, "the recovery configuration")?;
+    require_old_enough(&marker, "the recovery request")?;
     Ok(())
 }
 
@@ -615,6 +822,7 @@ pub async fn verify(
     tx: &mut Transaction<'_, Postgres>,
     event: &ProtocolEvent,
     origin: Option<&EventOrigin>,
+    heads: Option<&dyn HeadAttestor>,
 ) -> Result<Verified, IndexError> {
     match event.kind.as_str() {
         "identity.created" => {
@@ -627,7 +835,7 @@ pub async fn verify(
         "identity.signing_key_revoked" => verify_key_revoked(tx, event, origin)
             .await
             .map(|()| Verified::Other),
-        "identity.recovered" => verify_recovered(tx, event, origin)
+        "identity.recovered" => verify_recovered(tx, event, origin, heads)
             .await
             .map(|()| Verified::Other),
         kind if needs_author_signature(kind) => verify_author(tx, event, origin)
