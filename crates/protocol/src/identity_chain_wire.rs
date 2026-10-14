@@ -299,6 +299,36 @@ pub fn to_chained_event(
     })
 }
 
+/// The hashes of `identity.recovered` events the owner vetoed: a stored `identity.recovery_cancelled`
+/// for the same request id at the recovery's position or below it. A vetoed recovery is invalid, so it
+/// is dropped before the chain is resolved and can neither win a fork nor extend the chain.
+pub fn vetoed_recoveries(events: &[(ProtocolEvent, EventHash)]) -> BTreeSet<EventHash> {
+    let request_of = |event: &ProtocolEvent| -> Option<uuid::Uuid> {
+        event
+            .payload
+            .get("request_id")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    };
+    let cancels: Vec<(uuid::Uuid, u64)> = events
+        .iter()
+        .filter(|(e, _)| e.kind == "identity.recovery_cancelled")
+        .filter_map(|(e, _)| Some((request_of(e)?, e.identity_chain.as_ref()?.seq)))
+        .collect();
+    events
+        .iter()
+        .filter(|(e, _)| e.kind == "identity.recovered")
+        .filter(|(e, _)| {
+            let (Some(request), Some(position)) = (request_of(e), e.identity_chain.as_ref()) else {
+                return false;
+            };
+            cancels
+                .iter()
+                .any(|(cancelled, seq)| *cancelled == request && *seq <= position.seq)
+        })
+        .map(|(_, hash)| *hash)
+        .collect()
+}
+
 /// Replays an identity's events like [`apply_chain`], except that a fork is
 /// resolved when exactly one `identity.recovered` event (guardian-approved,
 /// its hash listed in `recovery_hashes`) extends the last unforked head at
@@ -402,15 +432,14 @@ mod tests {
     fn owner_is_the_issuer_and_recovery_markers_are_unchained() {
         let id = IdentityId::random_for_tests();
         let guardian = IdentityId::random_for_tests();
-        for kind in [
-            "identity.recovery_requested",
-            "identity.recovery_approved",
-            "identity.recovery_cancelled",
-        ] {
+        for kind in ["identity.recovery_requested", "identity.recovery_approved"] {
             let mut e = event(kind, guardian, 1, None);
             e.subject = GlobalId::new("identity", &id.to_string(), "self", "x");
             assert_eq!(chain_owner(&e), None, "{kind}");
         }
+        // The owner's veto is chained on the owner's own chain.
+        let cancelled = event("identity.recovery_cancelled", id, 1, None);
+        assert_eq!(chain_owner(&cancelled), Some(id));
         let e = event("profile.updated", id, 1, None);
         assert_eq!(chain_owner(&e), Some(id));
         let e = event("achievement.issued", id, 1, None);
@@ -425,6 +454,32 @@ mod tests {
             to_chained_event(&e, now, &ClockSkewBounds::default()),
             Err(ChainEventError::Timestamp(TimestampError::TooFarInFuture))
         );
+    }
+
+    #[test]
+    fn an_owner_cancel_at_or_below_a_recovery_vetoes_it() {
+        let id = IdentityId::random_for_tests();
+        let request = Uuid::new_v4();
+        let with_request = |kind: &str, seq: u64, request: Uuid| {
+            let mut e = event(kind, id, seq, None);
+            e.payload = json!({ "request_id": request });
+            let hash = event_hash(&e).unwrap();
+            (e, hash)
+        };
+        let recovered = with_request("identity.recovered", 3, request);
+        let other_recovered = with_request("identity.recovered", 3, Uuid::new_v4());
+        let below = with_request("identity.recovery_cancelled", 2, request);
+        let same = with_request("identity.recovery_cancelled", 3, request);
+        let above = with_request("identity.recovery_cancelled", 4, request);
+        let all = |extra: &[(ProtocolEvent, EventHash)]| {
+            let mut v = vec![recovered.clone(), other_recovered.clone()];
+            v.extend_from_slice(extra);
+            vetoed_recoveries(&v)
+        };
+        assert!(all(&[]).is_empty());
+        assert_eq!(all(&[below]), BTreeSet::from([recovered.1]));
+        assert_eq!(all(&[same]), BTreeSet::from([recovered.1]));
+        assert!(all(&[above]).is_empty());
     }
 
     #[test]
@@ -612,6 +667,7 @@ mod tests {
             "guild.member_added",
             "identity.passkey_registered",
             "identity.recovery_configured",
+            "identity.recovery_cancelled",
             "identity.recovered",
         ] {
             assert!(needs_author_signature(kind), "{kind}");
@@ -621,7 +677,6 @@ mod tests {
             "identity.signing_key_revoked",
             "identity.recovery_requested",
             "identity.recovery_approved",
-            "identity.recovery_cancelled",
             "achievement.issued",
         ] {
             assert!(!needs_author_signature(kind), "{kind}");

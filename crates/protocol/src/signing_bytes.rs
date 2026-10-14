@@ -449,6 +449,8 @@ pub const BUILT_LAYOUT_VERSIONS: &[(DomainTag, u16)] = &[
     (tags::IDENTITY_KEY_EVENT, 1),
     (tags::IDENTITY_CHAIN_SIGNATURE, 1),
     (tags::RECOVERY_APPROVAL, 1),
+    (tags::RECOVERY_REQUEST, 1),
+    (tags::RECOVERY_WITHDRAWAL, 1),
     (tags::SETTLEMENT_STH, 1),
     (tags::WITNESS_COSIGN, 1),
     (tags::WITNESS_ANNOUNCE, 1),
@@ -513,6 +515,8 @@ pub mod tags {
     pub const IDENTITY_CHAIN_SIGNATURE: DomainTag =
         DomainTag::new("avalon.identity.chain_signature");
     pub const RECOVERY_APPROVAL: DomainTag = DomainTag::new("avalon.recovery.approval");
+    pub const RECOVERY_REQUEST: DomainTag = DomainTag::new("avalon.recovery.request");
+    pub const RECOVERY_WITHDRAWAL: DomainTag = DomainTag::new("avalon.recovery.withdrawal");
     pub const SETTLEMENT_STH: DomainTag = DomainTag::new("avalon.settlement.sth");
     pub const WITNESS_COSIGN: DomainTag = DomainTag::new("avalon.witness.cosign");
     pub const WITNESS_ANNOUNCE: DomainTag = DomainTag::new("avalon.witness.announce");
@@ -541,6 +545,8 @@ pub mod tags {
         WITNESS_ANNOUNCE,
         IDENTITY_CHAIN_SIGNATURE,
         RECOVERY_APPROVAL,
+        RECOVERY_REQUEST,
+        RECOVERY_WITHDRAWAL,
         CONFORMANCE,
     ];
 }

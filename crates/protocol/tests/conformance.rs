@@ -1285,11 +1285,30 @@ fn chain_event_signature_matches_shared_vectors() {
     });
 }
 
+fn hash32(input: &Value, field: &str) -> [u8; 32] {
+    hex::decode(input[field].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+/// The guardian's chain position of an approval or withdrawal vector.
+fn guardian_position(input: &Value) -> (u64, Option<[u8; 32]>) {
+    let prev = input["guardianPrevHashHex"]
+        .as_str()
+        .map(|h| hex::decode(h).unwrap().try_into().unwrap());
+    (
+        input["guardianSeq"].as_str().unwrap().parse().unwrap(),
+        prev,
+    )
+}
+
 #[test]
 fn recovery_approval_matches_shared_vectors() {
-    use avalon_protocol::identity_id::recovery_approval_signing_bytes;
+    use avalon_protocol::identity_id::{recovery_approval_signing_bytes, RecoveryApprovalBinding};
     assert_identity_signing_vectors("recovery-approval.json", |_, input| {
         let new_key = verifying_key_from_hex(input["newPublicKeyHex"].as_str().unwrap());
+        let (seq, prev) = guardian_position(input);
         recovery_approval_signing_bytes(
             input["networkId"].as_str().unwrap(),
             &identity_id_of(input, "identityId"),
@@ -1297,6 +1316,44 @@ fn recovery_approval_matches_shared_vectors() {
             &identity_id_of(input, "guardianId"),
             parse_uuid(input, "guardianSigningKeyId"),
             new_key.as_bytes(),
+            &RecoveryApprovalBinding {
+                request_entry_hash: &hash32(input, "requestEntryHashHex"),
+                config_event_hash: &hash32(input, "configEventHashHex"),
+                guardian_seq: seq,
+                guardian_prev_hash: prev.as_ref(),
+            },
+        )
+    });
+}
+
+#[test]
+fn recovery_request_matches_shared_vectors() {
+    use avalon_protocol::identity_id::recovery_request_signing_bytes;
+    assert_identity_signing_vectors("recovery-request.json", |_, input| {
+        let new_key = verifying_key_from_hex(input["newPublicKeyHex"].as_str().unwrap());
+        recovery_request_signing_bytes(
+            input["networkId"].as_str().unwrap(),
+            &identity_id_of(input, "identityId"),
+            parse_uuid(input, "requestId"),
+            new_key.as_bytes(),
+            &hash32(input, "configEventHashHex"),
+        )
+    });
+}
+
+#[test]
+fn recovery_withdrawal_matches_shared_vectors() {
+    use avalon_protocol::identity_id::recovery_withdrawal_signing_bytes;
+    assert_identity_signing_vectors("recovery-withdrawal.json", |_, input| {
+        let (seq, prev) = guardian_position(input);
+        recovery_withdrawal_signing_bytes(
+            input["networkId"].as_str().unwrap(),
+            &identity_id_of(input, "identityId"),
+            parse_uuid(input, "requestId"),
+            &identity_id_of(input, "guardianId"),
+            parse_uuid(input, "guardianSigningKeyId"),
+            seq,
+            prev.as_ref(),
         )
     });
 }

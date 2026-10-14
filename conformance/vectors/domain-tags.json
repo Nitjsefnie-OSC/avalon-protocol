@@ -88,6 +88,14 @@
       "tag": "avalon.recovery.approval"
     },
     {
+      "kind": "recovery_request",
+      "tag": "avalon.recovery.request"
+    },
+    {
+      "kind": "recovery_withdrawal",
+      "tag": "avalon.recovery.withdrawal"
+    },
+    {
       "kind": "conformance",
       "tag": "avalon.conformance.vector"
     }

@@ -220,11 +220,12 @@ impl ActionClass {
             | K::IdentityRecoveryConfigured
             | K::IdentityRecovered => Some(ActionClass::ChainCritical),
 
-            // Requests, guardian approvals and cancellations are public markers: a guardian never
-            // signs on the owner's chain, and an unauthenticated request must not be able to fork it.
-            K::IdentityRecoveryRequested
-            | K::IdentityRecoveryApproved
-            | K::IdentityRecoveryCancelled => None,
+            // The owner's veto is chained and signed, and a concurrent one is never undone.
+            K::IdentityRecoveryCancelled => Some(ActionClass::Monotonic),
+
+            // Requests and guardian approvals are public markers: a guardian never signs on the
+            // owner's chain, and an unauthenticated request must not be able to fork it.
+            K::IdentityRecoveryRequested | K::IdentityRecoveryApproved => None,
 
             // identity.created is always seq 1 of a brand-new chain — there
             // is no predecessor it could conflict over.

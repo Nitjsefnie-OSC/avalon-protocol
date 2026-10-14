@@ -133,14 +133,22 @@ pub struct IdentityRecoveryConfiguredPayload {
     pub threshold: i32,
 }
 
+/// The public marker of a recovery request. The new key signs it
+/// (`recovery_request_signing_bytes`); its ledger entry is what the recovery delay is measured from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdentityRecoveryRequestedPayload {
     pub request_id: Uuid,
     pub threshold: i32,
     /// Base64 of the Ed25519 key the recovered identity will sign with; its key id is `request_id`.
     pub new_signing_public_key: String,
+    /// Lowercase hex chain hash of the `identity.recovery_configured` event the request relies on.
+    pub config_event_hash: String,
+    /// Base64 signature by the new key over `recovery_request_signing_bytes`.
+    pub signature: String,
 }
 
+/// A public marker of one guardian approval; the counters and delay are node-asserted display data and
+/// nothing decisional reads them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdentityRecoveryApprovedPayload {
     pub request_id: Uuid,
@@ -149,12 +157,21 @@ pub struct IdentityRecoveryApprovedPayload {
     pub threshold: i32,
     #[serde(with = "time::serde::rfc3339::option")]
     pub delay_ends_at: Option<OffsetDateTime>,
-    /// The guardian's own active key and its base64 signature over
+    /// Lowercase hex ledger entry hash of the request marker the approval binds.
+    pub request_entry_hash: String,
+    /// Lowercase hex chain hash of the recovery configuration the approval relies on.
+    pub config_event_hash: String,
+    /// The guardian's own key, its chain position and its base64 signature over
     /// `recovery_approval_signing_bytes` for this request.
     pub signing_key_id: Uuid,
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
     pub signature: String,
 }
 
+/// The owner's veto of a recovery request: a chained event signed by an active key of the owner. An
+/// `identity.recovered` for the same request id is invalid wherever this sits at or below its position.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdentityRecoveryCancelledPayload {
     pub request_id: Uuid,
@@ -169,7 +186,12 @@ pub struct IdentityRecoveredPayload {
     pub device_label: Option<String>,
     /// Base64 of the new Ed25519 key (key id `request_id`); the event is signed by it.
     pub new_signing_public_key: String,
-    /// Guardian approvals of exactly this request and key; at least the threshold must verify.
+    /// The request marker's payload exactly as published, so the request signature and the pinned
+    /// configuration can be checked without the ledger payload.
+    pub request: IdentityRecoveryRequestedPayload,
+    /// Lowercase hex ledger entry hash of that marker; the delay is measured from it.
+    pub request_entry_hash: String,
+    /// Guardian approvals of exactly this request, key and entry; at least the threshold must verify.
     pub approvals: Vec<RecoveryApprovalProof>,
 }
 
@@ -178,7 +200,25 @@ pub struct IdentityRecoveredPayload {
 pub struct RecoveryApprovalProof {
     pub guardian_id: IdentityId,
     pub signing_key_id: Uuid,
+    /// The guardian's chain position the key is judged at: its head `seq` plus one.
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
     /// Base64 Ed25519 signature over `recovery_approval_signing_bytes`.
+    pub signature: String,
+    /// The guardian's signed withdrawal of this approval; a withdrawn approval does not count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawal: Option<RecoveryWithdrawalProof>,
+}
+
+/// A guardian's signed withdrawal of an approval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryWithdrawalProof {
+    pub signing_key_id: Uuid,
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
+    /// Base64 Ed25519 signature over `recovery_withdrawal_signing_bytes`.
     pub signature: String,
 }
 
@@ -941,17 +981,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn identity_recovery_requested_round_trips() {
-        let payload = IdentityRecoveryRequestedPayload {
+    fn sample_requested() -> IdentityRecoveryRequestedPayload {
+        IdentityRecoveryRequestedPayload {
             request_id: Uuid::nil(),
             threshold: 2,
             new_signing_public_key: "AAAA".to_string(),
-        };
+            config_event_hash: "ab".repeat(32),
+            signature: "CCCC".to_string(),
+        }
+    }
+
+    #[test]
+    fn identity_recovery_requested_round_trips() {
+        let payload = sample_requested();
         let json = serde_json::json!({
             "request_id": "00000000-0000-0000-0000-000000000000",
             "threshold": 2,
             "new_signing_public_key": "AAAA",
+            "config_event_hash": "ab".repeat(32),
+            "signature": "CCCC",
         });
         assert_eq!(serde_json::to_value(&payload).unwrap(), json);
         assert_eq!(
@@ -968,7 +1016,11 @@ mod tests {
             approvals_count: 1,
             threshold: 2,
             delay_ends_at: Some(OffsetDateTime::UNIX_EPOCH),
+            request_entry_hash: "cd".repeat(32),
+            config_event_hash: "ab".repeat(32),
             signing_key_id: Uuid::nil(),
+            seq: 3,
+            prev_hash: Some("ef".repeat(32)),
             signature: "AAAA".to_string(),
         };
         let json = serde_json::json!({
@@ -977,7 +1029,11 @@ mod tests {
             "approvals_count": 1,
             "threshold": 2,
             "delay_ends_at": "1970-01-01T00:00:00Z",
+            "request_entry_hash": "cd".repeat(32),
+            "config_event_hash": "ab".repeat(32),
             "signing_key_id": "00000000-0000-0000-0000-000000000000",
+            "seq": 3,
+            "prev_hash": "ef".repeat(32),
             "signature": "AAAA",
         });
         assert_eq!(serde_json::to_value(&with_delay).unwrap(), json);
@@ -988,6 +1044,7 @@ mod tests {
 
         let without_delay = IdentityRecoveryApprovedPayload {
             delay_ends_at: None,
+            prev_hash: None,
             ..with_delay
         };
         let round_tripped: IdentityRecoveryApprovedPayload =
@@ -1020,20 +1077,39 @@ mod tests {
             request_id: Uuid::nil(),
             device_label: Some("New Phone".to_string()),
             new_signing_public_key: "AAAA".to_string(),
+            request: sample_requested(),
+            request_entry_hash: "cd".repeat(32),
             approvals: vec![RecoveryApprovalProof {
                 guardian_id: test_id(),
                 signing_key_id: Uuid::nil(),
+                seq: 1,
+                prev_hash: None,
                 signature: "BBBB".to_string(),
+                withdrawal: Some(RecoveryWithdrawalProof {
+                    signing_key_id: Uuid::nil(),
+                    seq: 2,
+                    prev_hash: Some("ef".repeat(32)),
+                    signature: "DDDD".to_string(),
+                }),
             }],
         };
         let json = serde_json::json!({
             "request_id": "00000000-0000-0000-0000-000000000000",
             "device_label": "New Phone",
             "new_signing_public_key": "AAAA",
+            "request": serde_json::to_value(sample_requested()).unwrap(),
+            "request_entry_hash": "cd".repeat(32),
             "approvals": [{
                 "guardian_id": test_id().to_string(),
                 "signing_key_id": "00000000-0000-0000-0000-000000000000",
+                "seq": 1,
                 "signature": "BBBB",
+                "withdrawal": {
+                    "signing_key_id": "00000000-0000-0000-0000-000000000000",
+                    "seq": 2,
+                    "prev_hash": "ef".repeat(32),
+                    "signature": "DDDD",
+                },
             }],
         });
         assert_eq!(serde_json::to_value(&payload).unwrap(), json);

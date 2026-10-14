@@ -227,6 +227,14 @@
         "new_signing_public_key": {
           "class": "authority_state",
           "disposition": "none"
+        },
+        "config_event_hash": {
+          "class": "authority_state",
+          "disposition": "none"
+        },
+        "signature": {
+          "class": "authority_state",
+          "disposition": "none"
         }
       }
     },
@@ -257,6 +265,22 @@
           "disposition": "none"
         },
         "signature": {
+          "class": "authority_state",
+          "disposition": "none"
+        },
+        "request_entry_hash": {
+          "class": "authority_state",
+          "disposition": "none"
+        },
+        "config_event_hash": {
+          "class": "authority_state",
+          "disposition": "none"
+        },
+        "seq": {
+          "class": "authority_state",
+          "disposition": "none"
+        },
+        "prev_hash": {
           "class": "authority_state",
           "disposition": "none"
         }
@@ -297,6 +321,14 @@
           "disposition": "none"
         },
         "approvals": {
+          "class": "authority_state",
+          "disposition": "none"
+        },
+        "request": {
+          "class": "authority_state",
+          "disposition": "none"
+        },
+        "request_entry_hash": {
           "class": "authority_state",
           "disposition": "none"
         }

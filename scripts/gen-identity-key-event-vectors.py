@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Writes the identity key-event signing vectors: identity-created-signing.json,
-device-grant-approval.json and signing-key-revoked.json under conformance/vectors.
+device-grant-approval.json, signing-key-revoked.json, identity-chain-signature.json,
+recovery-approval.json, recovery-request.json and recovery-withdrawal.json under conformance/vectors.
 
 A structured-bytes encoder that shares no code with the Rust one, so the committed
 expectations are an independent check of it. Requires the `cryptography` package.
@@ -125,6 +126,34 @@ def recovery_approval_bytes(i):
         + bytes.fromhex(i["guardianId"])
         + uid(i["guardianSigningKeyId"])
         + env.key(bytes.fromhex(i["newPublicKeyHex"]))
+        + bytes.fromhex(i["requestEntryHashHex"])
+        + bytes.fromhex(i["configEventHashHex"])
+        + position(i["guardianSeq"], i["guardianPrevHashHex"])
+        + tail()
+    )
+
+
+def recovery_request_bytes(i):
+    return (
+        header("avalon.recovery.request")
+        + st(i["networkId"])
+        + bytes.fromhex(i["identityId"])
+        + uid(i["requestId"])
+        + env.key(bytes.fromhex(i["newPublicKeyHex"]))
+        + bytes.fromhex(i["configEventHashHex"])
+        + tail()
+    )
+
+
+def recovery_withdrawal_bytes(i):
+    return (
+        header("avalon.recovery.withdrawal")
+        + st(i["networkId"])
+        + bytes.fromhex(i["identityId"])
+        + uid(i["requestId"])
+        + bytes.fromhex(i["guardianId"])
+        + uid(i["guardianSigningKeyId"])
+        + position(i["guardianSeq"], i["guardianPrevHashHex"])
         + tail()
     )
 
@@ -414,6 +443,8 @@ def write_chain_signature():
 
 def write_recovery_approval():
     guardian = identity_id_of(pubkey(SECOND_SEED)).hex()
+    entry = hashlib.sha256(b"request marker ledger entry").hexdigest()
+    config = hashlib.sha256(b"recovery configuration event").hexdigest()
     base = {
         "networkId": NETWORK,
         "identityId": IDENTITY,
@@ -421,11 +452,17 @@ def write_recovery_approval():
         "guardianId": guardian,
         "guardianSigningKeyId": KEY_A,
         "newPublicKeyHex": DEVICE_KEY,
+        "requestEntryHashHex": entry,
+        "configEventHashHex": config,
+        "guardianSeq": "3",
+        "guardianPrevHashHex": HEAD,
     }
     vectors = [
-        vector("a guardian approving a recovery to a new key", base, recovery_approval_bytes),
+        vector("a guardian approving a recovery to a new key at chain position 3", base, recovery_approval_bytes),
         vector("another new key", dict(base, newPublicKeyHex=SECOND_KEY), recovery_approval_bytes),
+        vector("a guardian with an empty chain (seq 1, no prev_hash)", dict(base, guardianSeq="1", guardianPrevHashHex=None), recovery_approval_bytes),
     ]
+    other = hashlib.sha256(b"another hash").hexdigest()
     replays = [
         replay("signed for another network", base, dict(base, networkId="avalon-int-1"), recovery_approval_bytes),
         replay("approving another recovery request", base, dict(base, requestId="5d0c3b1e-7a2f-4c9d-8e6b-2f1a0b3c4d5f"), recovery_approval_bytes),
@@ -433,15 +470,24 @@ def write_recovery_approval():
         replay("approving a recovery to another new key", base, dict(base, newPublicKeyHex=SECOND_KEY), recovery_approval_bytes),
         replay("approval presented by another guardian", base, dict(base, guardianId=IDENTITY), recovery_approval_bytes),
         replay("approval presented under another guardian key id", base, dict(base, guardianSigningKeyId=KEY_B), recovery_approval_bytes),
+        replay("approval for another request marker entry", base, dict(base, requestEntryHashHex=other), recovery_approval_bytes),
+        replay("approval relying on another recovery configuration", base, dict(base, configEventHashHex=other), recovery_approval_bytes),
+        replay("approval judged at another guardian chain position", base, dict(base, guardianSeq="4"), recovery_approval_bytes),
+        replay("approval on another guardian chain head", base, dict(base, guardianPrevHashHex=OTHER_HEAD), recovery_approval_bytes),
+        replay("approval with the guardian chain head dropped", base, dict(base, guardianPrevHashHex=None), recovery_approval_bytes),
     ]
     doc = header_fields(
         "A guardian's approval of a recovery (avalon_protocol::identity_id::recovery_approval_signing_bytes): "
         "tag avalon.recovery.approval, layout version 1, fields network_id (str), the recovering identity_id "
         "(32 raw bytes), request_id (uuid, also the id of the new signing key), the guardian's identity id "
-        "(32 raw bytes), the guardian's signing_key_id (uuid) and the new public key (algorithm byte + 32 raw bytes). "
-        "The guardian signs with their own key and approves nothing but this recovery to this key. identity.recovered "
-        "embeds at least the threshold of these approvals. Here identityId is the recovering identity and the signer is "
-        "the guardian (signingKeySeedHex stands in for the guardian key). " + STRUCTURED +
+        "(32 raw bytes), the guardian's signing_key_id (uuid), the new public key (algorithm byte + 32 raw bytes), "
+        "the 32-byte ledger entry hash of the identity.recovery_requested marker, the 32-byte chain hash of the "
+        "identity.recovery_configured event relied on, and the guardian's chain position (seq u64, hash algorithm byte, "
+        "prev_hash flag byte then 32 bytes when present). The position is the seq the guardian's next chained event "
+        "would take; the guardian's key is judged at it from the guardian's own accepted chain. The guardian signs "
+        "with their own key and approves nothing but this recovery to this key. identity.recovered embeds at least "
+        "the threshold of these approvals. Here identityId is the recovering identity and the signer is the guardian "
+        "(signingKeySeedHex stands in for the guardian key). " + STRUCTURED +
         " replayVectors offer a signature made for one input with another input's bytes; it must not verify. "
         "There is no legacy layout.",
         GEN,
@@ -450,8 +496,86 @@ def write_recovery_approval():
     finish("recovery-approval.json", "recovery-approval", doc, REASON)
 
 
+def write_recovery_request():
+    config = hashlib.sha256(b"recovery configuration event").hexdigest()
+    base = {
+        "networkId": NETWORK,
+        "identityId": IDENTITY,
+        "requestId": "5d0c3b1e-7a2f-4c9d-8e6b-2f1a0b3c4d5e",
+        "newPublicKeyHex": DEVICE_KEY,
+        "configEventHashHex": config,
+    }
+    vectors = [
+        vector("a request naming a new key and the configuration relied on", base, recovery_request_bytes),
+        vector("another new key", dict(base, newPublicKeyHex=SECOND_KEY), recovery_request_bytes),
+    ]
+    other = hashlib.sha256(b"another hash").hexdigest()
+    replays = [
+        replay("signed for another network", base, dict(base, networkId="avalon-int-1"), recovery_request_bytes),
+        replay("another request id", base, dict(base, requestId="5d0c3b1e-7a2f-4c9d-8e6b-2f1a0b3c4d5f"), recovery_request_bytes),
+        replay("a request for another identity", base, dict(base, identityId=identity_id_of(pubkey(SECOND_SEED)).hex()), recovery_request_bytes),
+        replay("another new key", base, dict(base, newPublicKeyHex=SECOND_KEY), recovery_request_bytes),
+        replay("relying on another recovery configuration", base, dict(base, configEventHashHex=other), recovery_request_bytes),
+    ]
+    doc = header_fields(
+        "The request for a recovery (avalon_protocol::identity_id::recovery_request_signing_bytes): tag "
+        "avalon.recovery.request, layout version 1, fields network_id (str), the recovering identity_id "
+        "(32 raw bytes), request_id (uuid, also the id of the new signing key), the new public key (algorithm "
+        "byte + 32 raw bytes) and the 32-byte chain hash of the identity.recovery_configured event the request "
+        "relies on. The holder of the new key signs it (signingKeySeedHex stands in for the new key); it is the "
+        "signature of the identity.recovery_requested marker. " + STRUCTURED +
+        " replayVectors offer a signature made for one input with another input's bytes; it must not verify. "
+        "There is no legacy layout.",
+        GEN,
+        {"replayVectors": replays, "legacyLayoutVectors": [], "vectors": vectors},
+    )
+    finish("recovery-request.json", "recovery-request", doc, REASON)
+
+
+def write_recovery_withdrawal():
+    guardian = identity_id_of(pubkey(SECOND_SEED)).hex()
+    base = {
+        "networkId": NETWORK,
+        "identityId": IDENTITY,
+        "requestId": "5d0c3b1e-7a2f-4c9d-8e6b-2f1a0b3c4d5e",
+        "guardianId": guardian,
+        "guardianSigningKeyId": KEY_A,
+        "guardianSeq": "3",
+        "guardianPrevHashHex": HEAD,
+    }
+    vectors = [
+        vector("a guardian withdrawing an approval at chain position 3", base, recovery_withdrawal_bytes),
+        vector("a guardian with an empty chain (seq 1, no prev_hash)", dict(base, guardianSeq="1", guardianPrevHashHex=None), recovery_withdrawal_bytes),
+    ]
+    replays = [
+        replay("signed for another network", base, dict(base, networkId="avalon-int-1"), recovery_withdrawal_bytes),
+        replay("withdrawing from another request", base, dict(base, requestId="5d0c3b1e-7a2f-4c9d-8e6b-2f1a0b3c4d5f"), recovery_withdrawal_bytes),
+        replay("withdrawing from a recovery of another identity", base, dict(base, identityId=guardian), recovery_withdrawal_bytes),
+        replay("withdrawal presented by another guardian", base, dict(base, guardianId=IDENTITY), recovery_withdrawal_bytes),
+        replay("withdrawal presented under another guardian key id", base, dict(base, guardianSigningKeyId=KEY_B), recovery_withdrawal_bytes),
+        replay("withdrawal judged at another guardian chain position", base, dict(base, guardianSeq="4"), recovery_withdrawal_bytes),
+        replay("withdrawal on another guardian chain head", base, dict(base, guardianPrevHashHex=OTHER_HEAD), recovery_withdrawal_bytes),
+    ]
+    doc = header_fields(
+        "A guardian's withdrawal of an approval (avalon_protocol::identity_id::recovery_withdrawal_signing_bytes): "
+        "tag avalon.recovery.withdrawal, layout version 1, fields network_id (str), the recovering identity_id "
+        "(32 raw bytes), request_id (uuid), the guardian's identity id (32 raw bytes), the guardian's "
+        "signing_key_id (uuid) and the guardian's chain position (seq u64, hash algorithm byte, prev_hash flag "
+        "byte then 32 bytes when present) as for an approval. A withdrawal rides inside the approval proof it "
+        "withdraws, and a withdrawn approval does not count towards the threshold. The signer is the guardian "
+        "(signingKeySeedHex stands in for the guardian key). " + STRUCTURED +
+        " replayVectors offer a signature made for one input with another input's bytes; it must not verify. "
+        "There is no legacy layout.",
+        GEN,
+        {"replayVectors": replays, "legacyLayoutVectors": [], "vectors": vectors},
+    )
+    finish("recovery-withdrawal.json", "recovery-withdrawal", doc, REASON)
+
+
 if __name__ == "__main__":
     write_recovery_approval()
+    write_recovery_request()
+    write_recovery_withdrawal()
     write_chain_signature()
     write_created()
     write_grant()

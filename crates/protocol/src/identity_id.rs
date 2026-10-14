@@ -448,10 +448,45 @@ pub fn chain_event_signature_bytes(
         .expect("chain event signature fields fit a u32 length")
 }
 
+/// Bytes the holder of the new key signs to request a recovery: tag `avalon.recovery.request`, layout
+/// version 1, then `network_id` str, the recovering `owner` 32 raw bytes, `request_id` uuid (also the id
+/// of the new key), the `new_public_key` and the 32-byte `config_event_hash` of the
+/// `identity.recovery_configured` event the request relies on.
+pub fn recovery_request_signing_bytes(
+    network_id: &str,
+    owner: &IdentityId,
+    request_id: Uuid,
+    new_public_key: &[u8; 32],
+    config_event_hash: &[u8; 32],
+) -> Vec<u8> {
+    Builder::new(tags::RECOVERY_REQUEST, 1)
+        .str(network_id)
+        .fixed(owner.as_bytes())
+        .uuid(request_id)
+        .key(new_public_key)
+        .hash(config_event_hash)
+        .finish()
+        .expect("recovery request fields fit a u32 length")
+}
+
+/// What a guardian's approval binds beyond the recovery itself: the ledger entry of the request marker,
+/// the configuration event it relies on and the position in the guardian's own chain the key is judged at.
+pub struct RecoveryApprovalBinding<'a> {
+    pub request_entry_hash: &'a [u8; 32],
+    pub config_event_hash: &'a [u8; 32],
+    /// The `seq` the guardian's next chained event would take (head plus one).
+    pub guardian_seq: u64,
+    /// The head event hash of the guardian's chain at that position, absent for an empty chain.
+    pub guardian_prev_hash: Option<&'a [u8; 32]>,
+}
+
 /// Bytes a guardian signs to approve a recovery: tag `avalon.recovery.approval`, layout version 1,
 /// then `network_id` str, the recovering `owner` 32 raw bytes, `request_id` uuid (also the id of the
-/// new key), the `guardian` 32 raw bytes, the guardian's `guardian_signing_key_id` uuid and the
-/// `new_public_key` the recovered identity will sign with. It approves nothing else.
+/// new key), the `guardian` 32 raw bytes, the guardian's `guardian_signing_key_id` uuid, the
+/// `new_public_key` the recovered identity will sign with, the 32-byte ledger entry hash of the request
+/// marker, the 32-byte hash of the recovery configuration event relied on, and the guardian's chain
+/// position (`seq` u64, `hash_algo` u8, `prev_hash` flag and hash) as for a device grant. It approves
+/// nothing else.
 pub fn recovery_approval_signing_bytes(
     network_id: &str,
     owner: &IdentityId,
@@ -459,16 +494,43 @@ pub fn recovery_approval_signing_bytes(
     guardian: &IdentityId,
     guardian_signing_key_id: Uuid,
     new_public_key: &[u8; 32],
+    binding: &RecoveryApprovalBinding<'_>,
 ) -> Vec<u8> {
-    Builder::new(tags::RECOVERY_APPROVAL, 1)
+    let builder = Builder::new(tags::RECOVERY_APPROVAL, 1)
         .str(network_id)
         .fixed(owner.as_bytes())
         .uuid(request_id)
         .fixed(guardian.as_bytes())
         .uuid(guardian_signing_key_id)
         .key(new_public_key)
+        .hash(binding.request_entry_hash)
+        .hash(binding.config_event_hash);
+    with_position(builder, binding.guardian_seq, binding.guardian_prev_hash)
         .finish()
         .expect("recovery approval fields fit a u32 length")
+}
+
+/// Bytes a guardian signs to withdraw an approval: tag `avalon.recovery.withdrawal`, layout version 1,
+/// then `network_id` str, the recovering `owner` 32 raw bytes, `request_id` uuid, the `guardian` 32 raw
+/// bytes, the `guardian_signing_key_id` uuid and the guardian's chain position as for an approval.
+pub fn recovery_withdrawal_signing_bytes(
+    network_id: &str,
+    owner: &IdentityId,
+    request_id: Uuid,
+    guardian: &IdentityId,
+    guardian_signing_key_id: Uuid,
+    guardian_seq: u64,
+    guardian_prev_hash: Option<&[u8; 32]>,
+) -> Vec<u8> {
+    let builder = Builder::new(tags::RECOVERY_WITHDRAWAL, 1)
+        .str(network_id)
+        .fixed(owner.as_bytes())
+        .uuid(request_id)
+        .fixed(guardian.as_bytes())
+        .uuid(guardian_signing_key_id);
+    with_position(builder, guardian_seq, guardian_prev_hash)
+        .finish()
+        .expect("recovery withdrawal fields fit a u32 length")
 }
 
 #[cfg(test)]
@@ -718,6 +780,53 @@ mod tests {
         tail.extend_from_slice(&head);
         tail.extend_from_slice(&[0, 0]);
         assert!(base.ends_with(&tail));
+    }
+
+    #[test]
+    fn recovery_signing_bytes_cover_every_bound_field() {
+        let (key, owner) = test_identity(7);
+        let (_, guardian) = test_identity(8);
+        let pk = key.verifying_key().to_bytes();
+        let (request, kid) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let (entry, config, head) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let approve = |entry: &[u8; 32], config: &[u8; 32], seq, prev: Option<&[u8; 32]>| {
+            recovery_approval_signing_bytes(
+                "net",
+                &owner,
+                request,
+                &guardian,
+                kid,
+                &pk,
+                &RecoveryApprovalBinding {
+                    request_entry_hash: entry,
+                    config_event_hash: config,
+                    guardian_seq: seq,
+                    guardian_prev_hash: prev,
+                },
+            )
+        };
+        let base = approve(&entry, &config, 4, Some(&head));
+        assert!(base.starts_with(b"avalon.recovery.approval\x00\x01\x00\x00\x00\x01"));
+        assert_ne!(base, approve(&[9; 32], &config, 4, Some(&head)));
+        assert_ne!(base, approve(&entry, &[9; 32], 4, Some(&head)));
+        assert_ne!(base, approve(&entry, &config, 5, Some(&head)));
+        assert_ne!(base, approve(&entry, &config, 4, Some(&[9; 32])));
+        assert_ne!(base, approve(&entry, &config, 4, None));
+
+        let req =
+            |config: &[u8; 32], id| recovery_request_signing_bytes("net", &owner, id, &pk, config);
+        let base = req(&config, request);
+        assert!(base.starts_with(b"avalon.recovery.request\x00\x01"));
+        assert_ne!(base, req(&[9; 32], request));
+        assert_ne!(base, req(&config, Uuid::from_u128(5)));
+
+        let withdraw = |seq, prev: Option<&[u8; 32]>| {
+            recovery_withdrawal_signing_bytes("net", &owner, request, &guardian, kid, seq, prev)
+        };
+        let base = withdraw(4, Some(&head));
+        assert!(base.starts_with(b"avalon.recovery.withdrawal\x00\x01"));
+        assert_ne!(base, withdraw(5, Some(&head)));
+        assert_ne!(base, withdraw(4, None));
     }
 
     #[test]
