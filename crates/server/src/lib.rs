@@ -89,6 +89,7 @@ pub mod realtime_relay;
 pub mod rebuild;
 pub mod recognitions;
 pub mod recovery;
+pub mod recovery_heads;
 pub mod redis_limits;
 pub mod registry;
 pub mod relay;
@@ -618,6 +619,10 @@ fn full_routes(state: AppState) -> Router {
             post(recovery::cancel_request),
         )
         .route(
+            "/recovery/requests/{id}/withdraw",
+            post(recovery::withdraw_approval),
+        )
+        .route(
             "/recovery/requests/{id}/finalize",
             post(recovery::finalize_request),
         )
@@ -1132,7 +1137,14 @@ mod node_auth_wiring {
             ),
             indexer: state::IndexerHandle::Local(
                 avalon_indexer::postgres::PostgresIndexer::new(pool.clone())
-                    .with_local_origin("avalon-test", "core"),
+                    .with_local_origin("avalon-test", "core")
+                    .with_head_attestor(std::sync::Arc::new(
+                        avalon_indexer::head_attestor::SqlHeadAttestor::new(
+                            "avalon-test",
+                            "core",
+                            std::sync::Arc::new(|| 0),
+                        ),
+                    )),
             ),
             pool,
             webauthn,

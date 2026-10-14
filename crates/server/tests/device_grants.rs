@@ -84,8 +84,9 @@ async fn seed_signing_key(
     let key_id: Uuid = sqlx::Row::try_get(&row, "id").unwrap();
     // The projection the node verifies approvals against holds the same key.
     sqlx::query(
-        "INSERT INTO indexer_identity_signing_keys (signing_key_id, identity_id, public_key, added_at) \
-         VALUES ($1, $2, $3, now())",
+        "INSERT INTO indexer_identity_signing_keys \
+         (signing_key_id, identity_id, public_key, added_at, inception) \
+         VALUES ($1, $2, $3, now(), true)",
     )
     .bind(key_id)
     .bind(identity_id)

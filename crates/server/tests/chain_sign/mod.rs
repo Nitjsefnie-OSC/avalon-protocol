@@ -41,8 +41,9 @@ pub async fn register(pool: &PgPool, who: &TestIdentity) -> Uuid {
     .await
     .expect("failed to seed signing key");
     sqlx::query(
-        "INSERT INTO indexer_identity_signing_keys (signing_key_id, identity_id, public_key, added_at) \
-         VALUES ($1, $2, $3, now())",
+        "INSERT INTO indexer_identity_signing_keys \
+         (signing_key_id, identity_id, public_key, added_at, inception) \
+         VALUES ($1, $2, $3, now(), true)",
     )
     .bind(key_id)
     .bind(who.id)

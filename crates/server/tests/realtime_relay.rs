@@ -102,8 +102,9 @@ async fn seed_signing_key(
     let signing_key = SigningKey::generate(&mut rand::rng());
     let signing_key_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO indexer_identity_signing_keys (signing_key_id, identity_id, public_key, added_at) \
-         VALUES ($1, $2, $3, now())",
+        "INSERT INTO indexer_identity_signing_keys \
+         (signing_key_id, identity_id, public_key, added_at, inception) \
+         VALUES ($1, $2, $3, now(), true)",
     )
     .bind(signing_key_id)
     .bind(identity_id)

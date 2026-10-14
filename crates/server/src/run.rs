@@ -468,9 +468,15 @@ pub async fn run_with_tracing(
 
     // Events this node authors are verified against its own network and shard.
     let indexer = match indexer {
-        IndexerHandle::Local(local) => {
-            IndexerHandle::Local(local.with_local_origin(&network_id, &own_shard_id))
-        }
+        IndexerHandle::Local(local) => IndexerHandle::Local(
+            local
+                .with_local_origin(&network_id, &own_shard_id)
+                .with_head_attestor(crate::recovery_heads::head_attestor(
+                    &network_id,
+                    &own_shard_id,
+                    known_list_handle.clone(),
+                )),
+        ),
         remote => remote,
     };
 
@@ -752,7 +758,12 @@ pub async fn run_with_tracing(
             pool.clone(),
             chain.clone(),
             avalon_indexer::postgres::PostgresIndexer::new(pool.clone())
-                .with_local_origin(&network_id, &own_shard_id),
+                .with_local_origin(&network_id, &own_shard_id)
+                .with_head_attestor(crate::recovery_heads::head_attestor(
+                    &network_id,
+                    &own_shard_id,
+                    known_list_handle.clone(),
+                )),
             mirror_config,
             mirror_watcher::MirrorWatcherHandles {
                 interest: state.interest.clone(),

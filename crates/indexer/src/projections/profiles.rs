@@ -228,8 +228,8 @@ pub async fn apply_created(
     .await?;
     let inserted = sqlx::query(
         "INSERT INTO indexer_identity_signing_keys \
-         (signing_key_id, identity_id, public_key, label, added_at, revoked_at) \
-         VALUES ($1, $2, $3, NULL, $4, \
+         (signing_key_id, identity_id, public_key, label, added_at, inception, revoked_at) \
+         VALUES ($1, $2, $3, NULL, $4, true, \
                  (SELECT revoked_at FROM indexer_identity_signing_key_revocations \
                   WHERE identity_id = $2 AND signing_key_id = $1)) \
          ON CONFLICT DO NOTHING",

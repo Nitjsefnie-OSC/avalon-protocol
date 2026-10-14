@@ -1,3 +1,4 @@
+ALTER TABLE recovery_requests ADD COLUMN delay_ends_at TIMESTAMPTZ;
 DROP INDEX recovery_approvals_id_idx;
 ALTER TABLE recovery_approvals DROP COLUMN withdrawal_signature;
 ALTER TABLE recovery_approvals DROP COLUMN withdrawal_prev_hash;

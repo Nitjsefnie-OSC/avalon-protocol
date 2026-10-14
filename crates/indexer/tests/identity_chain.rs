@@ -3,16 +3,22 @@
 //! applying the same event set to one database in different orders and
 //! comparing the resulting state.
 
+mod support;
+
 use avalon_indexer::identity_chain_store;
 use avalon_indexer::identity_proof::EventOrigin;
 use avalon_indexer::postgres::PostgresIndexer;
 use avalon_indexer::Indexer;
+use avalon_protocol::event_payloads::IdentityRecoveryRequestedPayload;
 use avalon_protocol::events::{IdentityChainPosition, ProtocolEvent};
-use avalon_protocol::identity_chain_wire::{event_hash, needs_author_signature};
+use avalon_protocol::identity_chain_wire::{embed_position, event_hash, needs_author_signature};
 use avalon_protocol::identity_id::{
-    device_grant_approval_signing_bytes, TestIdentity, TEST_NETWORK_ID,
+    device_grant_approval_signing_bytes, recovery_approval_signing_bytes,
+    recovery_request_signing_bytes, RecoveryApprovalBinding, TestIdentity, TEST_NETWORK_ID,
 };
 use avalon_protocol::ids::{GlobalId, IdentityId};
+use avalon_protocol::ledger_entry::payload_hash;
+use avalon_protocol::signing_bytes::HashAlgo;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
@@ -63,7 +69,31 @@ fn chained(
 }
 
 fn indexer(pool: &PgPool) -> PostgresIndexer {
-    PostgresIndexer::new(pool.clone()).with_local_origin(TEST_NETWORK_ID, "core")
+    PostgresIndexer::new(pool.clone())
+        .with_local_origin(TEST_NETWORK_ID, "core")
+        .with_head_attestor(support::heads())
+}
+
+/// Applies `events` in the given order, then keeps retrying those that wait on an earlier chain
+/// position until a pass applies nothing more: delivery order never changes the outcome.
+async fn apply_until_settled(indexer: &PostgresIndexer, events: &[&ProtocolEvent]) {
+    let mut pending: Vec<&ProtocolEvent> = events.to_vec();
+    loop {
+        let before = pending.len();
+        let mut waiting = Vec::new();
+        for event in pending {
+            match indexer.apply(event).await {
+                Ok(()) => {}
+                Err(e) if e.is_deferred() => waiting.push(event),
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        pending = waiting;
+        if pending.is_empty() || pending.len() == before {
+            assert!(pending.is_empty(), "events never became applicable");
+            return;
+        }
+    }
 }
 
 /// A signed `identity.signing_key_added` payload for a fresh device key, approved by `approver`
@@ -107,8 +137,9 @@ async fn add_inception_key(pool: &PgPool, indexer: &PostgresIndexer, who: &TestI
     use base64::Engine as _;
     let key_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO indexer_identity_signing_keys (signing_key_id, identity_id, public_key, added_at) \
-         VALUES ($1, $2, $3, now())",
+        "INSERT INTO indexer_identity_signing_keys \
+         (signing_key_id, identity_id, public_key, added_at, inception) \
+         VALUES ($1, $2, $3, now(), true)",
     )
     .bind(key_id)
     .bind(who.id)
@@ -245,9 +276,7 @@ async fn conflicting_profile_edits_converge_in_any_arrival_order() {
     ];
     for order in orders {
         reset(&pool, id, &all).await;
-        for e in order {
-            indexer.apply(e).await.unwrap();
-        }
+        apply_until_settled(&indexer, &order).await;
         assert_eq!(
             profile(&pool, id).await,
             (Some("B".to_string()), None),
@@ -322,20 +351,69 @@ async fn conflicting_key_events_fork_and_recovery_resolves() {
     let new_key = TestIdentity::new();
     let request_id = Uuid::new_v4();
     let b64 = base64::engine::general_purpose::STANDARD;
+    let config_hash = event_hash(&configured).unwrap();
+    // The configuration and the request marker were covered by cosigned heads long enough ago.
+    let position = configured.identity_chain.as_ref().unwrap();
+    support::heads().put(
+        hex::encode(config_hash),
+        support::attestation(
+            &configured.kind,
+            configured.id,
+            configured.subject.to_string(),
+            payload_hash(&embed_position(&configured.payload, position)).unwrap(),
+            100,
+        ),
+    );
+    let request = IdentityRecoveryRequestedPayload {
+        request_id,
+        threshold: 2,
+        new_signing_public_key: b64.encode(new_key.public_key()),
+        config_event_hash: hex::encode(config_hash),
+        signature: b64.encode(
+            new_key
+                .signing_key
+                .sign(&recovery_request_signing_bytes(
+                    TEST_NETWORK_ID,
+                    &id,
+                    request_id,
+                    &new_key.public_key(),
+                    &config_hash,
+                ))
+                .to_bytes(),
+        ),
+    };
+    let entry_hash = HashAlgo::Sha256.digest(request_id.as_bytes());
+    support::heads().put(
+        hex::encode(entry_hash),
+        support::attestation(
+            "identity.recovery_requested",
+            Uuid::new_v4(),
+            gid(id, "recovery_requested").to_string(),
+            payload_hash(&serde_json::to_value(&request).unwrap()).unwrap(),
+            100,
+        ),
+    );
     let approvals: Vec<_> = guardians
         .iter()
         .map(|(g, key)| {
-            let bytes = avalon_protocol::identity_id::recovery_approval_signing_bytes(
+            let bytes = recovery_approval_signing_bytes(
                 TEST_NETWORK_ID,
                 &id,
                 request_id,
                 &g.id,
                 *key,
                 &new_key.public_key(),
+                &RecoveryApprovalBinding {
+                    request_entry_hash: &entry_hash,
+                    config_event_hash: &config_hash,
+                    guardian_seq: 1,
+                    guardian_prev_hash: None,
+                },
             );
             serde_json::json!({
                 "guardian_id": g.id,
                 "signing_key_id": key,
+                "seq": 1,
                 "signature": b64.encode(g.signing_key.sign(&bytes).to_bytes()),
             })
         })
@@ -349,6 +427,8 @@ async fn conflicting_key_events_fork_and_recovery_resolves() {
             "request_id": request_id,
             "device_label": null,
             "new_signing_public_key": b64.encode(new_key.public_key()),
+            "request": request,
+            "request_entry_hash": hex::encode(entry_hash),
             "approvals": approvals,
         }),
         400,

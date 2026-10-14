@@ -11,9 +11,13 @@ use std::collections::HashSet;
 use avalon_protocol::event_payloads::{
     IdentityRecoveredPayload, IdentityRecoveryApprovedPayload, IdentityRecoveryCancelledPayload,
     IdentityRecoveryConfiguredPayload, IdentityRecoveryRequestedPayload, RecoveryApprovalProof,
+    RecoveryWithdrawalProof,
 };
 use avalon_protocol::events::{ProtocolEvent, ProtocolEventKindVariant};
 use avalon_protocol::ids::GlobalId;
+use avalon_protocol::recovery_rules::{
+    parse_hex32, required_approvals, MIN_RECOVERY_THRESHOLD, RECOVERY_DELAY,
+};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
@@ -36,17 +40,6 @@ use utoipa::ToSchema;
 const CEREMONY_TTL_MINUTES: i64 = 5;
 const RECOVERY_START_CEREMONY_KIND: &str = "recovery_start";
 
-/// A mandatory *public* time-delay so the real owner — if they still have
-/// any access at all, even just visibility via `identity_recovery_status`
-/// below — can veto a malicious recovery before it takes effect. 48 hours
-/// is the documented default: long enough to plausibly be noticed by an
-/// owner who only logs in occasionally, short enough that a genuine
-/// all-devices-lost recovery doesn't drag on for a week. Configurable via
-/// `AVALON_RECOVERY_DELAY_HOURS` per the ticket, since different
-/// deployments may reasonably want a different point in the 24-72h range
-/// it suggests.
-const DEFAULT_RECOVERY_DELAY_HOURS: i64 = 48;
-
 /// An M-of-N scheme with more than this many guardians stops being
 /// reviewable by a user choosing them ("who are all these people") and
 /// starts looking like a mistake rather than a deliberate trust decision.
@@ -63,14 +56,6 @@ const MAX_GUARDIANS: usize = 10;
 const MAX_RECOVERY_ATTEMPTS_PER_WINDOW: i64 = 5;
 const RATE_LIMIT_WINDOW_HOURS: i64 = 24;
 
-fn recovery_delay_hours_from_env() -> i64 {
-    std::env::var("AVALON_RECOVERY_DELAY_HOURS")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|hours| *hours > 0)
-        .unwrap_or(DEFAULT_RECOVERY_DELAY_HOURS)
-}
-
 fn identity_ref(identity_id: IdentityId, verb: &str) -> GlobalId {
     GlobalId::new("identity", &identity_id.to_string(), "self", verb)
 }
@@ -82,10 +67,10 @@ fn identity_ref(identity_id: IdentityId, verb: &str) -> GlobalId {
 // ---------------------------------------------------------------------
 
 /// A guardian set must have at least one member and at most
-/// [`MAX_GUARDIANS`]; the threshold must be satisfiable (`1..=guardian_count`).
-/// This is the only thing standing between "no single guardian can
-/// authorize recovery alone" being true and being an accident of whatever
-/// value a client happened to send.
+/// [`MAX_GUARDIANS`]; the threshold must be satisfiable and at least the protocol minimum
+/// (`MIN_RECOVERY_THRESHOLD..=guardian_count`). This is the only thing standing between "no single
+/// guardian can authorize recovery alone" being true and being an accident of whatever value a
+/// client happened to send.
 pub(crate) fn validate_guardian_settings(
     guardian_count: usize,
     threshold: i32,
@@ -96,55 +81,38 @@ pub(crate) fn validate_guardian_settings(
     if guardian_count > MAX_GUARDIANS {
         return Err(AppError::InvalidGuardianSet);
     }
-    if threshold < 1 || threshold as usize > guardian_count {
+    if threshold < MIN_RECOVERY_THRESHOLD || threshold as usize > guardian_count {
         return Err(AppError::InvalidGuardianSet);
     }
     Ok(())
 }
 
-/// Whether a fresh approval count clears the threshold captured at request
-/// time. Deliberately `>=`, not `==`: a guardian set can shrink between
-/// request and approval (the owner regaining access and tightening it,
-/// say), and `threshold_at_request` is frozen at request creation, so a
-/// later approval count could in principle jump past it in one step.
+/// Whether a count of standing approvals clears the threshold captured at request time (never below
+/// the protocol minimum). Deliberately `>=`, not `==`: a guardian set can shrink between request and
+/// approval, and the threshold is frozen at request creation, so a later count could in principle
+/// jump past it in one step.
 pub(crate) fn meets_threshold(approvals_count: i64, threshold_at_request: i32) -> bool {
-    approvals_count >= threshold_at_request as i64
+    approvals_count >= required_approvals(threshold_at_request) as i64
 }
 
-/// The core "may this request finalize right now" check: it must actually
-/// be in the delay phase (not still collecting approvals, not already
-/// cancelled or completed), and the delay must have elapsed. Both checks
-/// fail closed — a missing `delay_ends_at` on a `delay`-status row should
-/// never happen, but is treated as "not ready" rather than panicking or,
-/// worse, treated as already elapsed.
-pub(crate) fn guard_can_finalize(
-    status: &str,
-    delay_ends_at: Option<OffsetDateTime>,
-    now: OffsetDateTime,
-) -> Result<(), AppError> {
-    if status == "completed" {
-        return Err(AppError::RecoveryAlreadyResolved);
-    }
-    if status != "delay" {
-        return Err(AppError::RecoveryNotReadyToFinalize);
-    }
-    match delay_ends_at {
-        Some(ends_at) if now >= ends_at => Ok(()),
+/// The core "may this request finalize right now" check: it must have collected its approvals (not
+/// still collecting, not cancelled or completed). Whether the delay has run is decided from cosigned
+/// tree heads when the event is verified, not from this node's clock.
+pub(crate) fn guard_can_finalize(status: &str) -> Result<(), AppError> {
+    match status {
+        "completed" => Err(AppError::RecoveryAlreadyResolved),
+        "delay" => Ok(()),
         _ => Err(AppError::RecoveryNotReadyToFinalize),
     }
 }
 
-/// Only the identity's own owner or one of its *current* guardians may
-/// veto an in-flight attempt — never a bystander, and never a guardian who
-/// has since been removed from the set (removing a compromised guardian is
-/// exactly the owner's own recourse, via the guardian-set endpoints below,
-/// not a reason that former guardian should retain a cancel button).
+/// Only the identity's own owner may veto: the veto is a chained event only an owner key can sign.
+/// A guardian's recourse is to withdraw their own approval.
 pub(crate) fn guard_cancel_authority(
     caller: IdentityId,
     identity_id: IdentityId,
-    current_guardians: &HashSet<IdentityId>,
 ) -> Result<(), AppError> {
-    if caller == identity_id || current_guardians.contains(&caller) {
+    if caller == identity_id {
         Ok(())
     } else {
         Err(AppError::Forbidden)
@@ -505,6 +473,8 @@ async fn current_guardian_set(
 struct RecoveryStartCeremonyState {
     identity_id: IdentityId,
     device_label: Option<String>,
+    /// Chain hash of the recovery configuration the request will rely on, fixed at start.
+    config_event_hash: String,
     webauthn_state: PasskeyRegistration,
 }
 
@@ -519,6 +489,24 @@ pub struct RecoveryStartResponse {
     pub ticket_id: Uuid,
     #[schema(value_type = Object)]
     pub challenge: CreationChallengeResponse,
+    /// Lowercase hex chain hash of the owner's current `identity.recovery_configured` event: the
+    /// configuration the request must name and sign.
+    pub config_event_hash: String,
+}
+
+/// The chain hash of the identity's latest accepted `identity.recovery_configured` event.
+async fn current_config_hash(
+    state: &AppState,
+    identity_id: IdentityId,
+) -> Result<Option<[u8; 32]>, AppError> {
+    let mut tx = state.pool.begin().await?;
+    let events =
+        avalon_indexer::identity_chain_store::accepted_events(&mut tx, identity_id).await?;
+    Ok(events
+        .iter()
+        .rev()
+        .find(|e| e.kind == "identity.recovery_configured")
+        .and_then(|e| avalon_protocol::identity_chain_wire::event_hash(e).ok()))
 }
 
 async fn recent_request_count(state: &AppState, identity_id: IdentityId) -> Result<i64, AppError> {
@@ -576,9 +564,12 @@ pub async fn start_request(
         return Err(AppError::RecoveryNotAvailable);
     };
     let threshold: i32 = settings_row.try_get("threshold")?;
-    if threshold < 1 {
+    if threshold < MIN_RECOVERY_THRESHOLD {
         return Err(AppError::RecoveryNotAvailable);
     }
+    let config_event_hash = current_config_hash(&state, body.identity_id)
+        .await?
+        .ok_or(AppError::RecoveryNotAvailable)?;
 
     let recent_count = recent_request_count(&state, body.identity_id).await?;
     guard_rate_limit(recent_count)?;
@@ -609,6 +600,7 @@ pub async fn start_request(
     let ceremony = RecoveryStartCeremonyState {
         identity_id: body.identity_id,
         device_label: body.device_label,
+        config_event_hash: hex::encode(config_event_hash),
         webauthn_state,
     };
     let ticket_id = Uuid::new_v4();
@@ -627,6 +619,7 @@ pub async fn start_request(
     Ok(Json(RecoveryStartResponse {
         ticket_id,
         challenge,
+        config_event_hash: hex::encode(config_event_hash),
     }))
 }
 
@@ -635,8 +628,13 @@ pub struct RecoveryFinishRequest {
     pub ticket_id: Uuid,
     #[schema(value_type = Object)]
     pub webauthn_credential: RegisterPublicKeyCredential,
-    /// Base64 Ed25519 public key the recovered identity will sign with; its key id is the request id.
+    /// Base64 Ed25519 public key the recovered identity will sign with.
     pub new_signing_public_key: String,
+    /// The request id, chosen by the requester; it is also the id of the new signing key.
+    pub request_id: Uuid,
+    /// Base64 signature by the new key over `recovery_request_signing_bytes` for this request, key
+    /// and the `config_event_hash` the start response named.
+    pub signature: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -645,13 +643,23 @@ pub struct RecoveryRequestResponse {
     pub identity_id: IdentityId,
     pub status: String,
     pub threshold: i32,
+    /// Approvals that stand, that is, not withdrawn.
     pub approvals_count: i64,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = "date-time")]
     pub requested_at: OffsetDateTime,
+    /// The earliest the delay can have run: the time of the first cosigned tree head covering the
+    /// request marker plus the protocol delay. Null until such a head exists. Display only; the
+    /// delay is decided when `identity.recovered` is verified.
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = "date-time")]
     pub delay_ends_at: Option<OffsetDateTime>,
+    /// Base64 of the key the recovered identity will sign with.
+    pub new_signing_public_key: String,
+    /// Lowercase hex chain hash of the recovery configuration the request relies on.
+    pub config_event_hash: String,
+    /// Lowercase hex ledger entry hash of the request marker; guardians approve once it exists.
+    pub request_entry_hash: Option<String>,
 }
 
 /// `POST /recovery/requests/finish` — completes the ceremony and creates
@@ -704,19 +712,42 @@ pub async fn finish_request(
         return Err(AppError::RecoveryNotAvailable);
     };
     let threshold: i32 = settings_row.try_get("threshold")?;
-    if threshold < 1 {
+    if threshold < MIN_RECOVERY_THRESHOLD {
         return Err(AppError::RecoveryNotAvailable);
+    }
+    let config_hash = parse_hex32(&ceremony.config_event_hash).ok_or(AppError::CeremonyNotFound)?;
+    if current_config_hash(&state, ceremony.identity_id).await? != Some(config_hash) {
+        return Err(AppError::RecoveryConfigChanged);
     }
 
     let recent_count = recent_request_count(&state, ceremony.identity_id).await?;
     guard_rate_limit(recent_count)?;
 
-    let _new_key: [u8; 32] = BASE64
+    let new_key: [u8; 32] = BASE64
         .decode(&body.new_signing_public_key)
         .ok()
         .and_then(|raw| raw.try_into().ok())
         .filter(|key| avalon_protocol::ed25519_key::parse_ed25519_public_key(key).is_some())
         .ok_or(AppError::InvalidRecoveryKey)?;
+    let signature: [u8; 64] = BASE64
+        .decode(&body.signature)
+        .ok()
+        .and_then(|raw| raw.try_into().ok())
+        .ok_or(AppError::InvalidAuthorSignature)?;
+    let request_bytes = avalon_protocol::identity_id::recovery_request_signing_bytes(
+        state.chain.network_id(),
+        &ceremony.identity_id,
+        body.request_id,
+        &new_key,
+        &config_hash,
+    );
+    let signed =
+        avalon_protocol::ed25519_key::parse_ed25519_public_key(&new_key).is_some_and(|key| {
+            avalon_protocol::ed25519_key::verify_strict_signature(&key, &request_bytes, &signature)
+        });
+    if !signed {
+        return Err(AppError::InvalidAuthorSignature);
+    }
     let passkey = state
         .webauthn
         .finish_passkey_registration(&body.webauthn_credential, &ceremony.webauthn_state)
@@ -727,13 +758,15 @@ pub async fn finish_request(
     let mut tx = state.pool.begin().await?;
 
     let requested_at = OffsetDateTime::now_utc();
-    let request_id = Uuid::new_v4();
+    let request_id = body.request_id;
+    let request_event_id = Uuid::new_v4();
     let inserted = sqlx::query(
         r#"
         INSERT INTO recovery_requests
             (id, identity_id, pending_passkey_data, pending_credential_id, pending_device_label,
-             threshold_at_request, status, requested_at, new_signing_public_key)
-        VALUES ($1, $2, $3, $4, $5, $6, 'pending_approvals', $7, $8)
+             threshold_at_request, status, requested_at, new_signing_public_key,
+             config_event_hash, request_signature, request_event_id)
+        VALUES ($1, $2, $3, $4, $5, $6, 'pending_approvals', $7, $8, $9, $10, $11)
         "#,
     )
     .bind(request_id)
@@ -744,6 +777,9 @@ pub async fn finish_request(
     .bind(threshold)
     .bind(requested_at)
     .bind(&body.new_signing_public_key)
+    .bind(&ceremony.config_event_hash)
+    .bind(&body.signature)
+    .bind(request_event_id)
     .execute(&mut *tx)
     .await;
     if let Err(sqlx::Error::Database(db_err)) = &inserted {
@@ -754,7 +790,7 @@ pub async fn finish_request(
     inserted?;
 
     let event = ProtocolEvent {
-        id: Uuid::new_v4(),
+        id: request_event_id,
         kind: ProtocolEventKindVariant::IdentityRecoveryRequested
             .as_str()
             .to_string(),
@@ -764,6 +800,8 @@ pub async fn finish_request(
             request_id,
             threshold,
             new_signing_public_key: body.new_signing_public_key.clone(),
+            config_event_hash: ceremony.config_event_hash.clone(),
+            signature: body.signature.clone(),
         })
         .expect("IdentityRecoveryRequestedPayload should serialize"),
         timestamp: requested_at,
@@ -774,15 +812,7 @@ pub async fn finish_request(
 
     tx.commit().await?;
 
-    Ok(Json(RecoveryRequestResponse {
-        id: request_id,
-        identity_id: ceremony.identity_id,
-        status: "pending_approvals".to_string(),
-        threshold,
-        approvals_count: 0,
-        requested_at,
-        delay_ends_at: None,
-    }))
+    request_response(&state, request_id).await.map(Json)
 }
 
 // ---------------------------------------------------------------------
@@ -794,12 +824,15 @@ struct RequestRow {
     status: String,
     threshold_at_request: i32,
     requested_at: OffsetDateTime,
-    delay_ends_at: Option<OffsetDateTime>,
+    new_signing_public_key: String,
+    config_event_hash: String,
+    request_event_id: Uuid,
 }
 
 async fn fetch_request(state: &AppState, request_id: Uuid) -> Result<RequestRow, AppError> {
     let row = sqlx::query(
-        "SELECT identity_id, status, threshold_at_request, requested_at, delay_ends_at \
+        "SELECT identity_id, status, threshold_at_request, requested_at, new_signing_public_key, \
+                config_event_hash, request_event_id \
          FROM recovery_requests WHERE id = $1",
     )
     .bind(request_id)
@@ -811,105 +844,140 @@ async fn fetch_request(state: &AppState, request_id: Uuid) -> Result<RequestRow,
         status: row.try_get("status")?,
         threshold_at_request: row.try_get("threshold_at_request")?,
         requested_at: row.try_get("requested_at")?,
-        delay_ends_at: row.try_get("delay_ends_at")?,
+        new_signing_public_key: row
+            .try_get::<Option<String>, _>("new_signing_public_key")?
+            .ok_or(AppError::InvalidRecoveryKey)?,
+        config_event_hash: row
+            .try_get::<Option<String>, _>("config_event_hash")?
+            .ok_or(AppError::RecoveryConfigChanged)?,
+        request_event_id: row
+            .try_get::<Option<Uuid>, _>("request_event_id")?
+            .ok_or(AppError::RecoveryRequestNotFound)?,
     })
 }
 
+/// Approvals that stand: a withdrawn approval does not count.
 async fn approvals_count(state: &AppState, request_id: Uuid) -> Result<i64, AppError> {
-    let row = sqlx::query("SELECT COUNT(*) AS count FROM recovery_approvals WHERE request_id = $1")
-        .bind(request_id)
-        .fetch_one(&state.pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS count FROM recovery_approvals \
+         WHERE request_id = $1 AND withdrawal_signature IS NULL",
+    )
+    .bind(request_id)
+    .fetch_one(&state.pool)
+    .await?;
     Ok(row.try_get("count")?)
 }
 
-fn to_response(id: Uuid, row: RequestRow, approvals_count: i64) -> RecoveryRequestResponse {
-    RecoveryRequestResponse {
-        id,
+/// The ledger entry hash of the request marker, once the outbox has committed it.
+async fn request_entry_hash(
+    state: &AppState,
+    request_event_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT entry_hash FROM ledger_entries WHERE event_id = $1 AND kind = $2",
+    )
+    .bind(request_event_id)
+    .bind(ProtocolEventKindVariant::IdentityRecoveryRequested.as_str())
+    .fetch_optional(&state.pool)
+    .await?)
+}
+
+/// The earliest moment the delay can have run, from the first cosigned head covering the marker.
+async fn delay_ends_at(state: &AppState, entry_hash: Option<&str>) -> Option<OffsetDateTime> {
+    let (heads, entry_hash) = (state.indexer.head_attestor()?, entry_hash?);
+    let mut conn = state.pool.acquire().await.ok()?;
+    let entry = heads.by_entry_hash(&mut conn, entry_hash).await.ok()??;
+    entry.covered_at.map(|covered| covered + RECOVERY_DELAY)
+}
+
+async fn request_response(
+    state: &AppState,
+    request_id: Uuid,
+) -> Result<RecoveryRequestResponse, AppError> {
+    let row = fetch_request(state, request_id).await?;
+    let approvals_count = approvals_count(state, request_id).await?;
+    let request_entry_hash = request_entry_hash(state, row.request_event_id).await?;
+    let delay_ends_at = delay_ends_at(state, request_entry_hash.as_deref()).await;
+    Ok(RecoveryRequestResponse {
+        id: request_id,
         identity_id: row.identity_id,
         status: row.status,
         threshold: row.threshold_at_request,
         approvals_count,
         requested_at: row.requested_at,
-        delay_ends_at: row.delay_ends_at,
-    }
+        delay_ends_at,
+        new_signing_public_key: row.new_signing_public_key,
+        config_event_hash: row.config_event_hash,
+        request_entry_hash,
+    })
 }
 
-/// The new Ed25519 key a recovery request names.
-async fn request_new_key(state: &AppState, request_id: Uuid) -> Result<[u8; 32], AppError> {
-    let text: Option<String> =
-        sqlx::query_scalar("SELECT new_signing_public_key FROM recovery_requests WHERE id = $1")
-            .bind(request_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or(AppError::RecoveryRequestNotFound)?;
-    text.and_then(|t| BASE64.decode(t).ok())
+fn decode_new_key(request: &RequestRow) -> Result<[u8; 32], AppError> {
+    BASE64
+        .decode(&request.new_signing_public_key)
+        .ok()
         .and_then(|raw| raw.try_into().ok())
         .ok_or(AppError::InvalidRecoveryKey)
 }
 
-/// Checks the guardian's approval signature against one of their active keys.
-async fn verify_guardian_approval(
+/// The public key of `guardian`'s key `signing_key_id` at its chain position `seq` (extending
+/// `prev_hash`), judged from the guardian's accepted chain. A key not valid there, or a chain not
+/// accepted far enough, is an invalid signature.
+async fn guardian_key_at(
     state: &AppState,
-    request: &RequestRow,
-    request_id: Uuid,
     guardian: IdentityId,
-    body: &ApproveRecoveryRequest,
-) -> Result<(), AppError> {
-    let new_key = request_new_key(state, request_id).await?;
-    let raw: Vec<u8> = sqlx::query_scalar(
-        "SELECT public_key FROM identity_signing_keys \
-         WHERE id = $1 AND identity_id = $2 AND revoked_at IS NULL",
-    )
-    .bind(body.signing_key_id)
-    .bind(guardian)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::InvalidAuthorSignature)?;
-    let key = <[u8; 32]>::try_from(raw).map_err(|_| AppError::InvalidAuthorSignature)?;
-    let signature: [u8; 64] = BASE64
-        .decode(&body.signature)
+    signing_key_id: Uuid,
+    seq: u64,
+    prev_hash: Option<&[u8; 32]>,
+) -> Result<[u8; 32], AppError> {
+    use avalon_indexer::IndexError;
+    let refused = |err: IndexError| match err {
+        IndexError::Rejected(_) | IndexError::AwaitingKey(_) => AppError::InvalidAuthorSignature,
+        other => other.into(),
+    };
+    let mut tx = state.pool.begin().await?;
+    let chain = avalon_indexer::identity_keys::load(&mut tx, guardian)
+        .await
+        .map_err(refused)?;
+    chain.require_extends(seq, prev_hash).map_err(refused)?;
+    let judged = chain.key_at(signing_key_id, seq).map_err(refused)?;
+    avalon_indexer::identity_keys::require_valid(judged, "guardian").map_err(refused)
+}
+
+fn verifies(key: &[u8; 32], bytes: &[u8], signature_b64: &str) -> bool {
+    let Some(signature) = BASE64
+        .decode(signature_b64)
         .ok()
-        .and_then(|raw| raw.try_into().ok())
-        .ok_or(AppError::InvalidAuthorSignature)?;
-    let bytes = avalon_protocol::identity_id::recovery_approval_signing_bytes(
-        state.chain.network_id(),
-        &request.identity_id,
-        request_id,
-        &guardian,
-        body.signing_key_id,
-        &new_key,
-    );
-    let verifies =
-        avalon_protocol::ed25519_key::parse_ed25519_public_key(&key).is_some_and(|key| {
-            avalon_protocol::ed25519_key::verify_strict_signature(&key, &bytes, &signature)
-        });
-    if verifies {
-        Ok(())
-    } else {
-        Err(AppError::InvalidAuthorSignature)
-    }
+        .and_then(|raw| <[u8; 64]>::try_from(raw).ok())
+    else {
+        return false;
+    };
+    avalon_protocol::ed25519_key::parse_ed25519_public_key(key).is_some_and(|key| {
+        avalon_protocol::ed25519_key::verify_strict_signature(&key, bytes, &signature)
+    })
+}
+
+/// A guardian's approval: their own key, their chain position and a signature over
+/// `recovery_approval_signing_bytes` for this request, new key, request marker entry and
+/// configuration.
+#[derive(Deserialize, ToSchema)]
+pub struct ApproveRecoveryRequest {
+    pub signing_key_id: Uuid,
+    /// The guardian's chain position the key is judged at: their chain head `seq` plus one.
+    pub seq: u64,
+    /// Lowercase hex head event hash of the guardian's chain; absent for an empty chain.
+    pub prev_hash: Option<String>,
+    pub signature: String,
 }
 
 /// `POST /recovery/requests/:id/approve` — a guardian's independent
 /// approval. Requires the caller to currently be one of the identity's
 /// guardians (not just at request time — a guardian removed since can no
-/// longer approve, mirroring [`guard_cancel_authority`]'s same "current,
-/// not historical, guardian" rule). Idempotency: a guardian approving
-/// twice hits `recovery_approvals`'s primary key and gets
-/// `AppError::AlreadyApproved`, not a double-counted approval. Reaching
-/// [`meets_threshold`] against `threshold_at_request` (frozen at request
-/// creation, not the identity's possibly-since-changed live threshold)
-/// transitions the row into the delay phase in the same transaction as
-/// this approval.
-/// A guardian's approval: their own active key and its signature over
-/// `recovery_approval_signing_bytes` for this request and its new key.
-#[derive(Deserialize, ToSchema)]
-pub struct ApproveRecoveryRequest {
-    pub signing_key_id: Uuid,
-    pub signature: String,
-}
-
+/// longer approve). The request marker must be in a ledger entry (which the
+/// approval signs) and the request must rely on the owner's current
+/// configuration. A guardian approving twice gets `AppError::AlreadyApproved`,
+/// unless they withdrew in between. Reaching [`meets_threshold`] transitions the
+/// row into the delay phase in the same transaction as this approval.
 #[utoipa::path(
     post,
     path = "/recovery/requests/{id}/approve",
@@ -936,75 +1004,103 @@ pub async fn approve_request(
         return Err(AppError::NotAGuardian);
     }
 
-    verify_guardian_approval(&state, &request, request_id, caller, &body).await?;
+    let entry_hash = request_entry_hash(&state, request.request_event_id)
+        .await?
+        .and_then(|h| parse_hex32(&h))
+        .ok_or(AppError::RecoveryRequestNotCommitted)?;
+    let config_hash =
+        parse_hex32(&request.config_event_hash).ok_or(AppError::RecoveryConfigChanged)?;
+    if current_config_hash(&state, request.identity_id).await? != Some(config_hash) {
+        return Err(AppError::RecoveryConfigChanged);
+    }
+    let new_key = decode_new_key(&request)?;
+    let prev_hash = crate::identity_chain::parse_prev_hash(body.prev_hash.as_deref())?;
+    let guardian_key = guardian_key_at(
+        &state,
+        caller,
+        body.signing_key_id,
+        body.seq,
+        prev_hash.as_ref(),
+    )
+    .await?;
+    let bytes = avalon_protocol::identity_id::recovery_approval_signing_bytes(
+        state.chain.network_id(),
+        &request.identity_id,
+        request_id,
+        &caller,
+        body.signing_key_id,
+        &new_key,
+        &avalon_protocol::identity_id::RecoveryApprovalBinding {
+            request_entry_hash: &entry_hash,
+            config_event_hash: &config_hash,
+            guardian_seq: body.seq,
+            guardian_prev_hash: prev_hash.as_ref(),
+        },
+    );
+    if !verifies(&guardian_key, &bytes, &body.signature) {
+        return Err(AppError::InvalidAuthorSignature);
+    }
 
     let mut tx = state.pool.begin().await?;
 
-    // Re-check status inside the transaction against a row lock, the same
-    // way `finalize_request` does — the `request.status` read above (before
-    // this transaction even opened) is only a cheap early-reject, not the
-    // authority for the decision below. Without this lock, a concurrent
-    // `cancel_request` could commit a veto between our earlier unlocked
-    // read and this point, and this approval would then unconditionally
-    // overwrite that veto's `status` back to `delay` — silently undoing an
-    // owner's/guardian's cancellation. Whichever of a concurrent cancel or
-    // approve commits first is authoritative; the loser sees a status this
-    // guard rejects.
+    // Re-check status inside the transaction against a row lock, the same way `finalize_request`
+    // does: a concurrent `cancel_request` could commit between the unlocked read above and here, and
+    // this approval would then overwrite that veto's status. Whichever commits first is authoritative.
     let locked = sqlx::query(
-        "SELECT status, delay_ends_at, threshold_at_request FROM recovery_requests WHERE id = $1 FOR UPDATE",
+        "SELECT status, threshold_at_request FROM recovery_requests WHERE id = $1 FOR UPDATE",
     )
     .bind(request_id)
     .fetch_one(&mut *tx)
     .await?;
     let locked_status: String = locked.try_get("status")?;
-    let locked_delay_ends_at: Option<OffsetDateTime> = locked.try_get("delay_ends_at")?;
     let locked_threshold: i32 = locked.try_get("threshold_at_request")?;
     if locked_status != "pending_approvals" && locked_status != "delay" {
         return Err(AppError::RecoveryAlreadyResolved);
     }
 
     let approved_at = OffsetDateTime::now_utc();
-    let inserted = sqlx::query(
-        "INSERT INTO recovery_approvals (request_id, guardian_identity_id, approved_at, signing_key_id, signature) \
-         VALUES ($1, $2, $3, $4, $5)",
+    // A guardian who withdrew may approve again; the new approval replaces the withdrawn one.
+    let written = sqlx::query(
+        "INSERT INTO recovery_approvals AS a \
+         (request_id, guardian_identity_id, approved_at, signing_key_id, signature, \
+          guardian_seq, guardian_prev_hash) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (request_id, guardian_identity_id) DO UPDATE SET \
+            id = gen_random_uuid(), approved_at = EXCLUDED.approved_at, \
+            signing_key_id = EXCLUDED.signing_key_id, signature = EXCLUDED.signature, \
+            guardian_seq = EXCLUDED.guardian_seq, guardian_prev_hash = EXCLUDED.guardian_prev_hash, \
+            withdrawal_signing_key_id = NULL, withdrawal_seq = NULL, \
+            withdrawal_prev_hash = NULL, withdrawal_signature = NULL \
+         WHERE a.withdrawal_signature IS NOT NULL",
     )
     .bind(request_id)
     .bind(caller)
     .bind(approved_at)
     .bind(body.signing_key_id)
     .bind(&body.signature)
+    .bind(body.seq as i64)
+    .bind(&body.prev_hash)
     .execute(&mut *tx)
-    .await;
-    if let Err(sqlx::Error::Database(db_err)) = &inserted {
-        if db_err.is_unique_violation() {
-            return Err(AppError::AlreadyApproved);
-        }
+    .await?;
+    if written.rows_affected() == 0 {
+        return Err(AppError::AlreadyApproved);
     }
-    inserted?;
 
-    let count_row =
-        sqlx::query("SELECT COUNT(*) AS count FROM recovery_approvals WHERE request_id = $1")
-            .bind(request_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let count_row = sqlx::query(
+        "SELECT COUNT(*) AS count FROM recovery_approvals \
+         WHERE request_id = $1 AND withdrawal_signature IS NULL",
+    )
+    .bind(request_id)
+    .fetch_one(&mut *tx)
+    .await?;
     let count: i64 = count_row.try_get("count")?;
 
-    let mut delay_ends_at = locked_delay_ends_at;
-    let mut status = locked_status;
-    if status == "pending_approvals" && meets_threshold(count, locked_threshold) {
-        status = "delay".to_string();
-        delay_ends_at = Some(approved_at + time::Duration::hours(recovery_delay_hours_from_env()));
-        // Still guarded by `WHERE status = 'pending_approvals'` as a second,
-        // belt-and-suspenders layer on top of the row lock above — this
-        // UPDATE can only ever affect the row we're already holding locked,
-        // so it can't race, but keeping the guard makes the invariant this
-        // statement relies on explicit at the call site, not just upheld by
-        // the lock elsewhere in the function.
+    if locked_status == "pending_approvals" && meets_threshold(count, locked_threshold) {
+        // Guarded by `WHERE status = 'pending_approvals'` as a second layer on top of the row lock.
         sqlx::query(
-            "UPDATE recovery_requests SET status = 'delay', delay_ends_at = $2 WHERE id = $1 AND status = 'pending_approvals'",
+            "UPDATE recovery_requests SET status = 'delay' WHERE id = $1 AND status = 'pending_approvals'",
         )
         .bind(request_id)
-        .bind(delay_ends_at)
         .execute(&mut *tx)
         .await?;
     }
@@ -1021,8 +1117,12 @@ pub async fn approve_request(
             guardian_id: caller,
             approvals_count: count,
             threshold: request.threshold_at_request,
-            delay_ends_at,
+            delay_ends_at: None,
+            request_entry_hash: hex::encode(entry_hash),
+            config_event_hash: request.config_event_hash.clone(),
             signing_key_id: body.signing_key_id,
+            seq: body.seq,
+            prev_hash: body.prev_hash.clone(),
             signature: body.signature.clone(),
         })
         .expect("IdentityRecoveryApprovedPayload should serialize"),
@@ -1034,28 +1134,126 @@ pub async fn approve_request(
 
     tx.commit().await?;
 
-    Ok(Json(RecoveryRequestResponse {
-        id: request_id,
-        identity_id: request.identity_id,
-        status,
-        threshold: request.threshold_at_request,
-        approvals_count: count,
-        requested_at: request.requested_at,
-        delay_ends_at,
-    }))
+    request_response(&state, request_id).await.map(Json)
 }
 
-#[derive(Deserialize, Default, ToSchema)]
+/// A guardian's signed withdrawal of their approval.
+#[derive(Deserialize, ToSchema)]
+pub struct WithdrawApprovalRequest {
+    pub signing_key_id: Uuid,
+    /// The guardian's chain position the key is judged at: their chain head `seq` plus one.
+    pub seq: u64,
+    /// Lowercase hex head event hash of the guardian's chain; absent for an empty chain.
+    pub prev_hash: Option<String>,
+    /// Base64 signature over `recovery_withdrawal_signing_bytes`.
+    pub signature: String,
+}
+
+/// `POST /recovery/requests/:id/withdraw` — a guardian withdraws their own approval. The signed
+/// withdrawal rides inside the approval proof of the `identity.recovered` draft, and a withdrawn
+/// approval does not count. If it drops the request below its threshold the request goes back to
+/// collecting approvals.
+#[utoipa::path(
+    post,
+    path = "/recovery/requests/{id}/withdraw",
+    tag = "recovery",
+    params(("id" = Uuid, Path)),
+    request_body = WithdrawApprovalRequest,
+    responses((status = 200, description = "The resulting recovery request", body = RecoveryRequestResponse)),
+)]
+pub async fn withdraw_approval(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<Uuid>,
+    Json(body): Json<WithdrawApprovalRequest>,
+) -> Result<Json<RecoveryRequestResponse>, AppError> {
+    let caller = authenticate(&state, &headers).await?;
+    let request = fetch_request(&state, request_id).await?;
+    if request.status != "pending_approvals" && request.status != "delay" {
+        return Err(AppError::RecoveryAlreadyResolved);
+    }
+    let prev_hash = crate::identity_chain::parse_prev_hash(body.prev_hash.as_deref())?;
+    let guardian_key = guardian_key_at(
+        &state,
+        caller,
+        body.signing_key_id,
+        body.seq,
+        prev_hash.as_ref(),
+    )
+    .await?;
+    let bytes = avalon_protocol::identity_id::recovery_withdrawal_signing_bytes(
+        state.chain.network_id(),
+        &request.identity_id,
+        request_id,
+        &caller,
+        body.signing_key_id,
+        body.seq,
+        prev_hash.as_ref(),
+    );
+    if !verifies(&guardian_key, &bytes, &body.signature) {
+        return Err(AppError::InvalidAuthorSignature);
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let locked = sqlx::query(
+        "SELECT status, threshold_at_request FROM recovery_requests WHERE id = $1 FOR UPDATE",
+    )
+    .bind(request_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let status: String = locked.try_get("status")?;
+    let threshold: i32 = locked.try_get("threshold_at_request")?;
+    if status != "pending_approvals" && status != "delay" {
+        return Err(AppError::RecoveryAlreadyResolved);
+    }
+    let withdrawn = sqlx::query(
+        "UPDATE recovery_approvals SET withdrawal_signing_key_id = $3, withdrawal_seq = $4, \
+                withdrawal_prev_hash = $5, withdrawal_signature = $6 \
+         WHERE request_id = $1 AND guardian_identity_id = $2 AND withdrawal_signature IS NULL",
+    )
+    .bind(request_id)
+    .bind(caller)
+    .bind(body.signing_key_id)
+    .bind(body.seq as i64)
+    .bind(&body.prev_hash)
+    .bind(&body.signature)
+    .execute(&mut *tx)
+    .await?;
+    if withdrawn.rows_affected() == 0 {
+        return Err(AppError::NoApprovalToWithdraw);
+    }
+    let standing: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM recovery_approvals \
+         WHERE request_id = $1 AND withdrawal_signature IS NULL",
+    )
+    .bind(request_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if status == "delay" && !meets_threshold(standing, threshold) {
+        sqlx::query(
+            "UPDATE recovery_requests SET status = 'pending_approvals' WHERE id = $1 AND status = 'delay'",
+        )
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    request_response(&state, request_id).await.map(Json)
+}
+
+#[derive(Deserialize, ToSchema)]
 pub struct CancelRecoveryRequest {
     pub reason: Option<String>,
+    /// The owner's signature of the chained `identity.recovery_cancelled` event this authors.
+    pub chain_event: crate::identity_chain::ChainEventSignature,
 }
 
-/// `POST /recovery/requests/:id/cancel` — the veto path. Either the
-/// identity's own owner (any session for `identity_id` itself — including,
-/// deliberately, a session opened on a still-trusted device the owner
-/// never lost) or any of its *current* guardians may cancel an in-flight
-/// attempt they believe is malicious, per [`guard_cancel_authority`]. A
-/// request already `completed`/`cancelled` cannot be cancelled again.
+/// `POST /recovery/requests/:id/cancel` — the owner's veto. The identity's own session cancels an
+/// in-flight attempt by authoring a chained `identity.recovery_cancelled` event signed by an active
+/// key of the owner; an `identity.recovered` for this request id is then invalid wherever the cancel
+/// sits at or below it in the owner's chain. A request already `completed`/`cancelled` cannot be
+/// cancelled again. A guardian's recourse is [`withdraw_approval`].
 #[utoipa::path(
     post,
     path = "/recovery/requests/{id}/cancel",
@@ -1076,9 +1274,7 @@ pub async fn cancel_request(
     if request.status == "completed" || request.status == "cancelled" {
         return Err(AppError::RecoveryAlreadyResolved);
     }
-
-    let guardians = current_guardian_set(&state, request.identity_id).await?;
-    guard_cancel_authority(caller, request.identity_id, &guardians)?;
+    guard_cancel_authority(caller, request.identity_id)?;
 
     let mut tx = state.pool.begin().await?;
 
@@ -1100,7 +1296,7 @@ pub async fn cancel_request(
         return Err(AppError::RecoveryAlreadyResolved);
     }
 
-    let event = ProtocolEvent {
+    let mut event = ProtocolEvent {
         id: Uuid::new_v4(),
         kind: ProtocolEventKindVariant::IdentityRecoveryCancelled
             .as_str()
@@ -1117,38 +1313,61 @@ pub async fn cancel_request(
         version: 1,
         identity_chain: None,
     };
+    crate::identity_chain::place_signed(&state, &mut tx, &mut event, &body.chain_event, None)
+        .await?;
     outbox::enqueue(&mut tx, &event).await?;
 
     tx.commit().await?;
 
-    let approvals = approvals_count(&state, request_id).await?;
-    Ok(Json(RecoveryRequestResponse {
-        id: request_id,
-        identity_id: request.identity_id,
-        status: "cancelled".to_string(),
-        threshold: request.threshold_at_request,
-        approvals_count: approvals,
-        requested_at: request.requested_at,
-        delay_ends_at: request.delay_ends_at,
-    }))
+    request_response(&state, request_id).await.map(Json)
 }
 
-/// The `identity.recovered` payload for a request: its new key and the guardian approvals
-/// collected so far, ordered by guardian id so every party derives the same bytes.
+/// The `identity.recovered` payload for a request and the ids of the approvals it carries: the new
+/// key, the signed request, its marker entry and every approval collected (a withdrawn one with its
+/// withdrawal), ordered by guardian id so every party derives the same bytes.
 async fn recovered_payload(
     conn: &mut sqlx::PgConnection,
     request_id: Uuid,
-) -> Result<IdentityRecoveredPayload, AppError> {
+) -> Result<(IdentityRecoveredPayload, Vec<Uuid>), AppError> {
     let request = sqlx::query(
-        "SELECT pending_device_label, new_signing_public_key FROM recovery_requests WHERE id = $1",
+        "SELECT pending_device_label, new_signing_public_key, threshold_at_request, \
+                config_event_hash, request_signature, request_event_id \
+         FROM recovery_requests WHERE id = $1",
     )
     .bind(request_id)
     .fetch_optional(&mut *conn)
     .await?
     .ok_or(AppError::RecoveryRequestNotFound)?;
-    let new_signing_public_key: Option<String> = request.try_get("new_signing_public_key")?;
+    let new_signing_public_key: String = request
+        .try_get::<Option<String>, _>("new_signing_public_key")?
+        .ok_or(AppError::InvalidRecoveryKey)?;
+    let request_event_id: Uuid = request
+        .try_get::<Option<Uuid>, _>("request_event_id")?
+        .ok_or(AppError::RecoveryRequestNotFound)?;
+    let request_entry_hash: String = sqlx::query_scalar(
+        "SELECT entry_hash FROM ledger_entries WHERE event_id = $1 AND kind = $2",
+    )
+    .bind(request_event_id)
+    .bind(ProtocolEventKindVariant::IdentityRecoveryRequested.as_str())
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(AppError::RecoveryRequestNotCommitted)?;
+    let marker = IdentityRecoveryRequestedPayload {
+        request_id,
+        threshold: request.try_get("threshold_at_request")?,
+        new_signing_public_key: new_signing_public_key.clone(),
+        config_event_hash: request
+            .try_get::<Option<String>, _>("config_event_hash")?
+            .ok_or(AppError::RecoveryConfigChanged)?,
+        signature: request
+            .try_get::<Option<String>, _>("request_signature")?
+            .ok_or(AppError::InvalidAuthorSignature)?,
+    };
     let rows = sqlx::query(
-        "SELECT guardian_identity_id, signing_key_id, signature FROM recovery_approvals \
+        "SELECT id, guardian_identity_id, signing_key_id, signature, guardian_seq, \
+                guardian_prev_hash, withdrawal_signing_key_id, withdrawal_seq, \
+                withdrawal_prev_hash, withdrawal_signature \
+         FROM recovery_approvals \
          WHERE request_id = $1 AND signing_key_id IS NOT NULL AND signature IS NOT NULL \
          ORDER BY guardian_identity_id",
     )
@@ -1156,19 +1375,52 @@ async fn recovered_payload(
     .fetch_all(&mut *conn)
     .await?;
     let mut approvals = Vec::with_capacity(rows.len());
+    let mut approval_ids = Vec::with_capacity(rows.len());
     for row in &rows {
+        let withdrawal = match row.try_get::<Option<String>, _>("withdrawal_signature")? {
+            Some(signature) => Some(RecoveryWithdrawalProof {
+                signing_key_id: row
+                    .try_get::<Option<Uuid>, _>("withdrawal_signing_key_id")?
+                    .ok_or(AppError::InvalidAuthorSignature)?,
+                seq: row
+                    .try_get::<Option<i64>, _>("withdrawal_seq")?
+                    .ok_or(AppError::InvalidAuthorSignature)? as u64,
+                prev_hash: row.try_get("withdrawal_prev_hash")?,
+                signature,
+            }),
+            None => None,
+        };
+        approval_ids.push(row.try_get("id")?);
         approvals.push(RecoveryApprovalProof {
             guardian_id: row.try_get("guardian_identity_id")?,
             signing_key_id: row.try_get("signing_key_id")?,
+            seq: row
+                .try_get::<Option<i64>, _>("guardian_seq")?
+                .ok_or(AppError::InvalidAuthorSignature)? as u64,
+            prev_hash: row.try_get("guardian_prev_hash")?,
             signature: row.try_get("signature")?,
+            withdrawal,
         });
     }
-    Ok(IdentityRecoveredPayload {
-        request_id,
-        device_label: request.try_get("pending_device_label")?,
-        new_signing_public_key: new_signing_public_key.ok_or(AppError::InvalidRecoveryKey)?,
-        approvals,
-    })
+    Ok((
+        IdentityRecoveredPayload {
+            request_id,
+            device_label: request.try_get("pending_device_label")?,
+            new_signing_public_key,
+            request: marker,
+            request_entry_hash,
+            approvals,
+        },
+        approval_ids,
+    ))
+}
+
+/// Lowercase hex SHA-256 of the draft payload's canonical form.
+fn draft_hash(payload: &IdentityRecoveredPayload) -> Result<String, AppError> {
+    let value = serde_json::to_value(payload).expect("IdentityRecoveredPayload should serialize");
+    avalon_protocol::ledger_entry::payload_hash(&value)
+        .map(hex::encode)
+        .map_err(|_| AppError::InvalidRecoveryKey)
 }
 
 /// The `identity.recovered` event the holder of the new key signs to finalize a recovery.
@@ -1180,6 +1432,10 @@ pub struct RecoveredDraft {
     pub subject: String,
     #[schema(value_type = Object)]
     pub payload: serde_json::Value,
+    /// The ids of the approvals the payload carries; finalize takes exactly these.
+    pub approval_ids: Vec<Uuid>,
+    /// Lowercase hex SHA-256 of the payload's canonical form.
+    pub draft_hash: String,
 }
 
 /// `GET /recovery/requests/{id}/recovered-draft` — public: exactly the event `finalize` will
@@ -1197,7 +1453,8 @@ pub async fn recovered_draft(
 ) -> Result<Json<RecoveredDraft>, AppError> {
     let request = fetch_request(&state, request_id).await?;
     let mut conn = state.pool.acquire().await?;
-    let payload = recovered_payload(&mut conn, request_id).await?;
+    let (payload, approval_ids) = recovered_payload(&mut conn, request_id).await?;
+    let draft_hash = draft_hash(&payload)?;
     Ok(Json(RecoveredDraft {
         kind: ProtocolEventKindVariant::IdentityRecovered
             .as_str()
@@ -1206,40 +1463,52 @@ pub async fn recovered_draft(
         issuer: identity_ref(request.identity_id, "recovered").to_string(),
         subject: identity_ref(request.identity_id, "recovered").to_string(),
         payload: serde_json::to_value(payload).expect("IdentityRecoveredPayload should serialize"),
+        approval_ids,
+        draft_hash,
     }))
 }
 
+/// What finalize takes: the signed event and the approvals its draft carried.
+#[derive(Deserialize, ToSchema)]
+pub struct FinalizeRecoveryRequest {
+    pub chain_event: crate::identity_chain::ChainEventSignature,
+    /// The `approval_ids` of the draft that was signed. If the approvals changed since, finalize
+    /// answers 409 `RECOVERY_DRAFT_STALE` with the current draft hash.
+    pub approval_ids: Vec<Uuid>,
+}
+
 /// `POST /recovery/requests/:id/finalize` — deliberately public and
-/// idempotent (see module docs): it grants nothing beyond what
-/// `approve_request`/the elapsed delay already durably authorized, so
-/// there is no meaningful caller identity to check. Calling it on an
-/// already-`completed` request simply returns the current (already
-/// finalized) state rather than erroring, so a client that finalizes
-/// eagerly and loses the race to another caller (or to a future
-/// auto-finalize sweep, not built this pass — see PR description) doesn't
-/// need special-case handling.
+/// idempotent: it grants nothing beyond what the approvals and the cosigned
+/// heads covering the request already authorized, so there is no meaningful
+/// caller identity to check. The delay is not read from this node's clock:
+/// the indexer verifies it from cosigned tree heads when the event is applied,
+/// and finalize answers `RECOVERY_NOT_READY_TO_FINALIZE` until it has run.
+/// Calling it on an already-`completed` request returns the current state.
 #[utoipa::path(
     post,
     path = "/recovery/requests/{id}/finalize",
     tag = "recovery",
     params(("id" = Uuid, Path)),
-    request_body = crate::identity_chain::SignedAction,
-    responses((status = 200, description = "The resulting recovery request", body = RecoveryRequestResponse)),
+    request_body = FinalizeRecoveryRequest,
+    responses(
+        (status = 200, description = "The resulting recovery request", body = RecoveryRequestResponse),
+        (status = 409, description = "RECOVERY_DRAFT_STALE (typed body: draft_hash of the current draft) or RECOVERY_NOT_READY_TO_FINALIZE", body = crate::error::RecoveryDraftStaleBody),
+    ),
 )]
 pub async fn finalize_request(
     State(state): State<AppState>,
     Path(request_id): Path<Uuid>,
-    Json(body): Json<crate::identity_chain::SignedAction>,
+    Json(body): Json<FinalizeRecoveryRequest>,
 ) -> Result<Json<RecoveryRequestResponse>, AppError> {
     let request = fetch_request(&state, request_id).await?;
 
     if request.status == "completed" {
-        let approvals = approvals_count(&state, request_id).await?;
-        return Ok(Json(to_response(request_id, request, approvals)));
+        return request_response(&state, request_id).await.map(Json);
     }
-
-    let now = OffsetDateTime::now_utc();
-    guard_can_finalize(&request.status, request.delay_ends_at, now)?;
+    guard_can_finalize(&request.status)?;
+    if state.indexer.head_attestor().is_none() {
+        return Err(AppError::RecoveryNotReadyToFinalize);
+    }
 
     let pending_row = sqlx::query(
         "SELECT pending_passkey_data, pending_credential_id, pending_device_label FROM recovery_requests WHERE id = $1",
@@ -1252,20 +1521,28 @@ pub async fn finalize_request(
     let pending_credential_id: Vec<u8> = pending_row.try_get("pending_credential_id")?;
     let pending_device_label: Option<String> = pending_row.try_get("pending_device_label")?;
 
+    let now = OffsetDateTime::now_utc();
     let mut tx = state.pool.begin().await?;
 
-    // Re-check status/delay inside the transaction against a row lock, so
-    // a concurrent cancel racing this finalize can't both "win" — whichever
-    // commits first is authoritative, and the loser's UPDATE below simply
-    // affects zero rows.
-    let locked =
-        sqlx::query("SELECT status, delay_ends_at FROM recovery_requests WHERE id = $1 FOR UPDATE")
-            .bind(request_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // Re-check status inside the transaction against a row lock, so a concurrent cancel racing this
+    // finalize can't both "win" — whichever commits first is authoritative.
+    let locked = sqlx::query("SELECT status FROM recovery_requests WHERE id = $1 FOR UPDATE")
+        .bind(request_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let locked_status: String = locked.try_get("status")?;
-    let locked_delay_ends_at: Option<OffsetDateTime> = locked.try_get("delay_ends_at")?;
-    guard_can_finalize(&locked_status, locked_delay_ends_at, now)?;
+    guard_can_finalize(&locked_status)?;
+
+    let (recovered_payload, current_ids) = recovered_payload(&mut tx, request_id).await?;
+    let mut signed_ids = body.approval_ids.clone();
+    signed_ids.sort();
+    let mut current_sorted = current_ids.clone();
+    current_sorted.sort();
+    if signed_ids != current_sorted {
+        return Err(AppError::RecoveryDraftStale {
+            draft_hash: draft_hash(&recovered_payload)?,
+        });
+    }
 
     // Recovery replaces every credential: the passkeys and signing keys that existed are revoked
     // (`identity.recovered` implies it) and the new passkey and key take their place.
@@ -1280,7 +1557,7 @@ pub async fn finalize_request(
     .bind(now)
     .execute(&mut *tx)
     .await?;
-    let new_key = request_new_key(&state, request_id).await?;
+    let new_key = decode_new_key(&request)?;
     sqlx::query(
         "INSERT INTO identity_signing_keys (id, identity_id, public_key, label) VALUES ($1, $2, $3, $4)",
     )
@@ -1290,7 +1567,6 @@ pub async fn finalize_request(
     .bind(&pending_device_label)
     .execute(&mut *tx)
     .await?;
-    let recovered_payload = recovered_payload(&mut tx, request_id).await?;
 
     sqlx::query(
         "INSERT INTO identity_keys (identity_id, credential_id, passkey_data, label) VALUES ($1, $2, $3, $4)",
@@ -1336,21 +1612,21 @@ pub async fn finalize_request(
     )
     .await?;
     outbox::enqueue(&mut tx, &event).await?;
-    state.indexer.apply_in_tx(&mut tx, &event).await?;
+    // The indexer decides the delay from cosigned heads; until it has run the whole finalize rolls back.
+    state
+        .indexer
+        .apply_in_tx(&mut tx, &event)
+        .await
+        .map_err(|err| match err {
+            avalon_indexer::IndexError::AwaitingKey(_)
+            | avalon_indexer::IndexError::Deferred(_) => AppError::RecoveryNotReadyToFinalize,
+            other => other.into(),
+        })?;
 
     tx.commit().await?;
     state.indexer.apply_after_commit(&event).await?;
 
-    let approvals = approvals_count(&state, request_id).await?;
-    Ok(Json(RecoveryRequestResponse {
-        id: request_id,
-        identity_id: request.identity_id,
-        status: "completed".to_string(),
-        threshold: request.threshold_at_request,
-        approvals_count: approvals,
-        requested_at: request.requested_at,
-        delay_ends_at: request.delay_ends_at,
-    }))
+    request_response(&state, request_id).await.map(Json)
 }
 
 /// `GET /recovery/requests/:id` — public, deliberately: the ticket's
@@ -1370,9 +1646,7 @@ pub async fn get_request(
     State(state): State<AppState>,
     Path(request_id): Path<Uuid>,
 ) -> Result<Json<RecoveryRequestResponse>, AppError> {
-    let request = fetch_request(&state, request_id).await?;
-    let approvals = approvals_count(&state, request_id).await?;
-    Ok(Json(to_response(request_id, request, approvals)))
+    request_response(&state, request_id).await.map(Json)
 }
 
 /// `GET /identities/:id/recovery/status` — same public data as
@@ -1404,9 +1678,9 @@ pub async fn identity_recovery_status(
         return Ok(Json(None));
     };
     let request_id: Uuid = row.try_get("id")?;
-    let request = fetch_request(&state, request_id).await?;
-    let approvals = approvals_count(&state, request_id).await?;
-    Ok(Json(Some(to_response(request_id, request, approvals))))
+    request_response(&state, request_id)
+        .await
+        .map(|response| Json(Some(response)))
 }
 
 /// `GET /me/recovery/status` — the session-authenticated equivalent of
@@ -1454,7 +1728,7 @@ pub async fn guardian_requests(
 
     let rows = sqlx::query(
         r#"
-        SELECT r.id, r.identity_id, r.status, r.threshold_at_request, r.requested_at, r.delay_ends_at
+        SELECT r.id
         FROM recovery_requests r
         JOIN recovery_guardians g
           ON g.identity_id = r.identity_id AND g.guardian_identity_id = $1
@@ -1469,23 +1743,16 @@ pub async fn guardian_requests(
     let mut summaries = Vec::with_capacity(rows.len());
     for row in rows {
         let id: Uuid = row.try_get("id")?;
-        let request = RequestRow {
-            identity_id: row.try_get("identity_id")?,
-            status: row.try_get("status")?,
-            threshold_at_request: row.try_get("threshold_at_request")?,
-            requested_at: row.try_get("requested_at")?,
-            delay_ends_at: row.try_get("delay_ends_at")?,
-        };
-        let approvals = approvals_count(&state, id).await?;
         let already_approved_row = sqlx::query(
-            "SELECT 1 FROM recovery_approvals WHERE request_id = $1 AND guardian_identity_id = $2",
+            "SELECT 1 FROM recovery_approvals \
+             WHERE request_id = $1 AND guardian_identity_id = $2 AND withdrawal_signature IS NULL",
         )
         .bind(id)
         .bind(caller)
         .fetch_optional(&state.pool)
         .await?;
         summaries.push(GuardianRequestSummary {
-            request: to_response(id, request, approvals),
+            request: request_response(&state, id).await?,
             already_approved: already_approved_row.is_some(),
         });
     }
@@ -1512,17 +1779,19 @@ mod tests {
     }
 
     #[test]
-    fn threshold_cannot_be_zero() {
-        assert!(matches!(
-            validate_guardian_settings(3, 0),
-            Err(AppError::InvalidGuardianSet)
-        ));
+    fn threshold_cannot_be_below_the_protocol_minimum() {
+        for threshold in [-1, 0, MIN_RECOVERY_THRESHOLD - 1] {
+            assert!(matches!(
+                validate_guardian_settings(3, threshold),
+                Err(AppError::InvalidGuardianSet)
+            ));
+        }
     }
 
     #[test]
     fn zero_guardians_is_rejected() {
         assert!(matches!(
-            validate_guardian_settings(0, 1),
+            validate_guardian_settings(0, MIN_RECOVERY_THRESHOLD),
             Err(AppError::InvalidGuardianSet)
         ));
     }
@@ -1530,7 +1799,7 @@ mod tests {
     #[test]
     fn more_than_max_guardians_is_rejected() {
         assert!(matches!(
-            validate_guardian_settings(MAX_GUARDIANS + 1, 1),
+            validate_guardian_settings(MAX_GUARDIANS + 1, MIN_RECOVERY_THRESHOLD),
             Err(AppError::InvalidGuardianSet)
         ));
     }
@@ -1538,7 +1807,7 @@ mod tests {
     #[test]
     fn a_valid_m_of_n_is_accepted() {
         assert!(validate_guardian_settings(5, 3).is_ok());
-        assert!(validate_guardian_settings(1, 1).is_ok());
+        assert!(validate_guardian_settings(2, MIN_RECOVERY_THRESHOLD).is_ok());
         assert!(validate_guardian_settings(MAX_GUARDIANS, MAX_GUARDIANS as i32).is_ok());
     }
 
@@ -1548,6 +1817,8 @@ mod tests {
     fn below_threshold_approvals_never_meet_it() {
         assert!(!meets_threshold(0, 2));
         assert!(!meets_threshold(1, 2));
+        // A stored threshold below the protocol minimum is raised to it.
+        assert!(!meets_threshold(1, 1));
     }
 
     #[test]
@@ -1556,49 +1827,33 @@ mod tests {
         assert!(meets_threshold(3, 2));
     }
 
-    // --- time-delay enforcement ---
+    // --- finalize gate (the delay itself is verified from cosigned heads by the indexer) ---
 
     #[test]
     fn cannot_finalize_while_still_collecting_approvals() {
-        let now = OffsetDateTime::now_utc();
         assert!(matches!(
-            guard_can_finalize("pending_approvals", None, now),
+            guard_can_finalize("pending_approvals"),
             Err(AppError::RecoveryNotReadyToFinalize)
         ));
     }
 
     #[test]
-    fn cannot_finalize_before_the_delay_elapses() {
-        let now = OffsetDateTime::now_utc();
-        let delay_ends_at = now + time::Duration::hours(1);
-        assert!(matches!(
-            guard_can_finalize("delay", Some(delay_ends_at), now),
-            Err(AppError::RecoveryNotReadyToFinalize)
-        ));
+    fn a_request_with_its_approvals_may_try_to_finalize() {
+        assert!(guard_can_finalize("delay").is_ok());
     }
 
     #[test]
-    fn can_finalize_once_the_delay_has_elapsed() {
-        let now = OffsetDateTime::now_utc();
-        let delay_ends_at = now - time::Duration::seconds(1);
-        assert!(guard_can_finalize("delay", Some(delay_ends_at), now).is_ok());
-    }
-
-    #[test]
-    fn cannot_finalize_a_cancelled_request_even_past_its_delay() {
-        let now = OffsetDateTime::now_utc();
-        let delay_ends_at = now - time::Duration::hours(1);
+    fn cannot_finalize_a_cancelled_request() {
         assert!(matches!(
-            guard_can_finalize("cancelled", Some(delay_ends_at), now),
+            guard_can_finalize("cancelled"),
             Err(AppError::RecoveryNotReadyToFinalize)
         ));
     }
 
     #[test]
     fn a_completed_request_cannot_finalize_again() {
-        let now = OffsetDateTime::now_utc();
         assert!(matches!(
-            guard_can_finalize("completed", None, now),
+            guard_can_finalize("completed"),
             Err(AppError::RecoveryAlreadyResolved)
         ));
     }
@@ -1608,39 +1863,15 @@ mod tests {
     #[test]
     fn the_owner_can_always_cancel_their_own_recovery() {
         let identity_id = IdentityId::random_for_tests();
-        let guardians = HashSet::new();
-        assert!(guard_cancel_authority(identity_id, identity_id, &guardians).is_ok());
+        assert!(guard_cancel_authority(identity_id, identity_id).is_ok());
     }
 
     #[test]
-    fn a_current_guardian_can_cancel() {
+    fn a_guardian_or_bystander_cannot_cancel() {
         let identity_id = IdentityId::random_for_tests();
-        let guardian = IdentityId::random_for_tests();
-        let mut guardians = HashSet::new();
-        guardians.insert(guardian);
-        assert!(guard_cancel_authority(guardian, identity_id, &guardians).is_ok());
-    }
-
-    #[test]
-    fn a_bystander_cannot_cancel() {
-        let identity_id = IdentityId::random_for_tests();
-        let bystander = IdentityId::random_for_tests();
-        let guardians = HashSet::new();
+        let other = IdentityId::random_for_tests();
         assert!(matches!(
-            guard_cancel_authority(bystander, identity_id, &guardians),
-            Err(AppError::Forbidden)
-        ));
-    }
-
-    #[test]
-    fn a_removed_former_guardian_cannot_cancel() {
-        let identity_id = IdentityId::random_for_tests();
-        let former_guardian = IdentityId::random_for_tests();
-        // Not in the *current* set — simulates having been removed since
-        // the recovery started.
-        let guardians = HashSet::new();
-        assert!(matches!(
-            guard_cancel_authority(former_guardian, identity_id, &guardians),
+            guard_cancel_authority(other, identity_id),
             Err(AppError::Forbidden)
         ));
     }
@@ -1663,41 +1894,5 @@ mod tests {
             guard_rate_limit(MAX_RECOVERY_ATTEMPTS_PER_WINDOW + 10),
             Err(AppError::RecoveryRateLimited)
         ));
-    }
-
-    #[test]
-    fn recovery_delay_env_var_overrides_default() {
-        let _env = crate::test_env::guard();
-        // SAFETY-of-intent note: `std::env::set_var` is process-global;
-        // this test does not run concurrently with anything else reading
-        // this exact var (no other test in this crate touches
-        // `AVALON_RECOVERY_DELAY_HOURS`), so it's safe here despite being
-        // `unsafe` in edition-2024 terms.
-        unsafe {
-            std::env::set_var("AVALON_RECOVERY_DELAY_HOURS", "72");
-        }
-        assert_eq!(recovery_delay_hours_from_env(), 72);
-        unsafe {
-            std::env::remove_var("AVALON_RECOVERY_DELAY_HOURS");
-        }
-        assert_eq!(
-            recovery_delay_hours_from_env(),
-            DEFAULT_RECOVERY_DELAY_HOURS
-        );
-    }
-
-    #[test]
-    fn a_non_positive_recovery_delay_env_var_falls_back_to_default() {
-        let _env = crate::test_env::guard();
-        unsafe {
-            std::env::set_var("AVALON_RECOVERY_DELAY_HOURS", "0");
-        }
-        assert_eq!(
-            recovery_delay_hours_from_env(),
-            DEFAULT_RECOVERY_DELAY_HOURS
-        );
-        unsafe {
-            std::env::remove_var("AVALON_RECOVERY_DELAY_HOURS");
-        }
     }
 }

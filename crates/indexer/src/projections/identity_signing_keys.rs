@@ -209,7 +209,8 @@ pub async fn apply(
                          (SELECT revoked_at FROM indexer_identity_signing_key_revocations \
                           WHERE identity_id = $2 AND signing_key_id = $1)) \
                  ON CONFLICT (identity_id, signing_key_id) DO UPDATE SET \
-                     label = COALESCE(k.label, EXCLUDED.label) \
+                     label = COALESCE(k.label, EXCLUDED.label), \
+                     inception = k.inception OR EXCLUDED.inception \
                  WHERE k.public_key = EXCLUDED.public_key",
             )
             .bind(signing_key_id)

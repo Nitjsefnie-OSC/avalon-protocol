@@ -36,6 +36,17 @@ pub enum IndexerHandle {
 }
 
 impl IndexerHandle {
+    /// The cosigned-head source of a local indexer; a remote one has none here, so a recovery cannot
+    /// be proven (and is not finalized) on a deployment without a local indexer.
+    pub fn head_attestor(
+        &self,
+    ) -> Option<std::sync::Arc<dyn avalon_indexer::head_attestor::HeadAttestor>> {
+        match self {
+            IndexerHandle::Local(indexer) => indexer.head_attestor(),
+            IndexerHandle::Remote(_) => None,
+        }
+    }
+
     /// The same-transaction, atomic half of an indexer write.
     ///
     /// For [`Self::Local`], this is exactly `PostgresIndexer::apply_in_tx`

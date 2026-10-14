@@ -95,8 +95,19 @@ pub async fn rebuild_index_from_events(
     own_shard_id: &str,
     ledger: LedgerEvents,
 ) -> Result<RebuildReport, avalon_chain::SettlementError> {
-    let indexer =
-        PostgresIndexer::new(index_pool.clone()).with_local_origin(network_id, own_shard_id);
+    let known_list = crate::known_list::KnownListHandle::load_or_new(
+        crate::known_list::KnownListConfig::from_env(),
+        Some(crate::known_list::known_list_path(
+            &crate::known_list::data_dir_from_env(),
+        )),
+    );
+    let indexer = PostgresIndexer::new(index_pool.clone())
+        .with_local_origin(network_id, own_shard_id)
+        .with_head_attestor(crate::recovery_heads::head_attestor(
+            network_id,
+            own_shard_id,
+            known_list,
+        ));
     let outcome = indexer
         .rebuild_from_scratch(&ledger.events)
         .await

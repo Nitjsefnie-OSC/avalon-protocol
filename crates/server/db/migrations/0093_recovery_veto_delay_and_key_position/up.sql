@@ -26,3 +26,6 @@ ALTER TABLE recovery_approvals ADD COLUMN withdrawal_seq BIGINT;
 ALTER TABLE recovery_approvals ADD COLUMN withdrawal_prev_hash TEXT;
 ALTER TABLE recovery_approvals ADD COLUMN withdrawal_signature TEXT;
 CREATE UNIQUE INDEX recovery_approvals_id_idx ON recovery_approvals (id);
+
+-- The delay is no longer a stored local-clock deadline: it is decided from cosigned tree heads.
+ALTER TABLE recovery_requests DROP COLUMN delay_ends_at;

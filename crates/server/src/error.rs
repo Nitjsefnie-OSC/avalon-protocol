@@ -15,6 +15,16 @@ pub struct ChainPositionStaleBody {
     pub head_hash: Option<String>,
 }
 
+/// Body of a 409 `RECOVERY_DRAFT_STALE`: the hash of the recovered draft finalize would build now.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct RecoveryDraftStaleBody {
+    pub error: String,
+    /// Always `RECOVERY_DRAFT_STALE`.
+    pub code: String,
+    /// Lowercase hex SHA-256 of the current draft's canonical payload.
+    pub draft_hash: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("unauthorized")]
@@ -386,10 +396,20 @@ pub enum AppError {
     PrincipalRateLimited { retry_after_secs: u64 },
     #[error("too many registration requests from this source, try again later")]
     RegistrationRateLimited { retry_after_secs: u64 },
-    #[error("this recovery request is not yet past its mandatory time-delay")]
+    #[error("this recovery request is not yet past its mandatory time-delay, measured between cosigned tree heads")]
     RecoveryNotReadyToFinalize,
     #[error("this recovery request has already been completed or cancelled")]
     RecoveryAlreadyResolved,
+    #[error(
+        "the approvals of this recovery changed since the draft was signed; sign the current draft"
+    )]
+    RecoveryDraftStale { draft_hash: String },
+    #[error("this recovery request is not in a ledger entry yet; guardians approve once it is")]
+    RecoveryRequestNotCommitted,
+    #[error("the owner's recovery configuration changed since this request; start a new request")]
+    RecoveryConfigChanged,
+    #[error("this guardian has no standing approval of this recovery request to withdraw")]
+    NoApprovalToWithdraw,
     #[error("caller is not a current guardian of this identity")]
     NotAGuardian,
     #[error("this guardian has already approved this recovery request")]
@@ -756,6 +776,10 @@ impl AppError {
             AppError::RegistrationRateLimited { .. } => "REGISTRATION_RATE_LIMITED",
             AppError::RecoveryNotReadyToFinalize => "RECOVERY_NOT_READY_TO_FINALIZE",
             AppError::RecoveryAlreadyResolved => "RECOVERY_ALREADY_RESOLVED",
+            AppError::RecoveryDraftStale { .. } => "RECOVERY_DRAFT_STALE",
+            AppError::RecoveryRequestNotCommitted => "RECOVERY_REQUEST_NOT_COMMITTED",
+            AppError::RecoveryConfigChanged => "RECOVERY_CONFIG_CHANGED",
+            AppError::NoApprovalToWithdraw => "NO_APPROVAL_TO_WITHDRAW",
             AppError::NotAGuardian => "NOT_A_GUARDIAN",
             AppError::AlreadyApproved => "ALREADY_APPROVED",
             AppError::GuildNotRecruiting => "GUILD_NOT_RECRUITING",
@@ -1001,13 +1025,18 @@ impl IntoResponse for AppError {
             // own doc comment for why the two must be indistinguishable
             // here specifically.
             AppError::RecoveryNotAvailable => StatusCode::NOT_FOUND,
-            AppError::RecoveryRequestNotFound => StatusCode::NOT_FOUND,
+            AppError::RecoveryRequestNotFound | AppError::NoApprovalToWithdraw => {
+                StatusCode::NOT_FOUND
+            }
             AppError::RecoveryAlreadyInProgress => StatusCode::CONFLICT,
             AppError::RecoveryRateLimited
             | AppError::PrincipalRateLimited { .. }
             | AppError::RegistrationRateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             AppError::RecoveryNotReadyToFinalize => StatusCode::CONFLICT,
-            AppError::RecoveryAlreadyResolved => StatusCode::CONFLICT,
+            AppError::RecoveryAlreadyResolved
+            | AppError::RecoveryDraftStale { .. }
+            | AppError::RecoveryRequestNotCommitted
+            | AppError::RecoveryConfigChanged => StatusCode::CONFLICT,
             AppError::NotAGuardian => StatusCode::FORBIDDEN,
             AppError::AlreadyApproved => StatusCode::CONFLICT,
             AppError::GuildNotRecruiting => StatusCode::FORBIDDEN,
@@ -1136,6 +1165,13 @@ impl IntoResponse for AppError {
                 code: self.code().to_string(),
                 head_seq: *head_seq,
                 head_hash: head_hash.clone(),
+            });
+        }
+        if let AppError::RecoveryDraftStale { draft_hash } = &self {
+            body = json!(RecoveryDraftStaleBody {
+                error: message.clone(),
+                code: self.code().to_string(),
+                draft_hash: draft_hash.clone(),
             });
         }
         let mut response = (status, Json(body)).into_response();

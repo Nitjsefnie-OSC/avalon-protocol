@@ -90,6 +90,11 @@ impl PostgresIndexer {
         }
     }
 
+    /// The cosigned-head source set by [`Self::with_head_attestor`], if any.
+    pub fn head_attestor(&self) -> Option<Arc<dyn HeadAttestor>> {
+        self.heads.clone()
+    }
+
     /// Sets where cosigned tree heads are read from, which `identity.recovered` needs to prove
     /// its delay. Without it every recovery is refused.
     pub fn with_head_attestor(mut self, heads: Arc<dyn HeadAttestor>) -> Self {

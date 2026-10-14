@@ -123,8 +123,9 @@ async fn seed_signing_key(pool: &PgPool, identity_id: Identity) -> (Uuid, Signin
     .unwrap();
     let key_id: Uuid = row.try_get("id").unwrap();
     sqlx::query(
-        "INSERT INTO indexer_identity_signing_keys (signing_key_id, identity_id, public_key, added_at) \
-         VALUES ($1, $2, $3, now())",
+        "INSERT INTO indexer_identity_signing_keys \
+         (signing_key_id, identity_id, public_key, added_at, inception) \
+         VALUES ($1, $2, $3, now(), true)",
     )
     .bind(key_id)
     .bind(identity_id)

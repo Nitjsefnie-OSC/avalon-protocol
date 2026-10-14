@@ -69,8 +69,9 @@ fn at_position(mut event: ProtocolEvent, seq: u64, prev: Option<[u8; 32]>) -> Pr
 /// so the inception key event for `key_id` binds to it.
 async fn seed_ticket_key(pool: &PgPool, who: &TestIdentity, key_id: Uuid) {
     sqlx::query(
-        "INSERT INTO indexer_identity_signing_keys (signing_key_id, identity_id, public_key, added_at) \
-         VALUES ($1, $2, $3, now())",
+        "INSERT INTO indexer_identity_signing_keys \
+         (signing_key_id, identity_id, public_key, added_at, inception) \
+         VALUES ($1, $2, $3, now(), true)",
     )
     .bind(key_id)
     .bind(who.id)
@@ -189,8 +190,9 @@ async fn seed_identity(pool: &PgPool) -> TestIdentity {
 async fn seed_key(pool: &PgPool, who: &TestIdentity) -> Uuid {
     let key_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO indexer_identity_signing_keys (signing_key_id, identity_id, public_key, added_at) \
-         VALUES ($1, $2, $3, now())",
+        "INSERT INTO indexer_identity_signing_keys \
+         (signing_key_id, identity_id, public_key, added_at, inception) \
+         VALUES ($1, $2, $3, now(), true)",
     )
     .bind(key_id)
     .bind(who.id)
