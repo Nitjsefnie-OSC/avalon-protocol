@@ -14,12 +14,6 @@ use uuid::Uuid;
 
 mod common;
 
-fn rp_origin() -> url::Url {
-    let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
 struct Started {
     ticket_id: Uuid,
     network_id: String,
@@ -97,7 +91,11 @@ async fn passkey(started: &Started) -> Value {
     let options: CredentialCreationOptions =
         serde_json::from_value(started.challenge.clone()).unwrap();
     let credential = client
-        .register(Origin::from(&rp_origin()), options, DefaultClientData)
+        .register(
+            Origin::from(&common::rp_origin()),
+            options,
+            DefaultClientData,
+        )
         .await
         .expect("virtual authenticator registration should succeed");
     serde_json::to_value(credential).unwrap()

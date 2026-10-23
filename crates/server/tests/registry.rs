@@ -50,26 +50,6 @@ async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::Identity
     (identity_id, token)
 }
 
-/// #697/#698: `POST /integrations/{slug}/connect` is signature-required —
-/// seeds a real signing key for `identity_id` so a connect call can
-/// produce a genuine fresh signature over HTTP.
-async fn seed_signing_key(
-    pool: &PgPool,
-    identity_id: avalon_protocol::ids::IdentityId,
-) -> (Uuid, SigningKey) {
-    let signing_key = SigningKey::generate(&mut rand::rng());
-    let public_key = signing_key.verifying_key().to_bytes();
-    let row = sqlx::query(
-        "INSERT INTO identity_signing_keys (identity_id, public_key) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(identity_id)
-    .bind(public_key.as_slice())
-    .fetch_one(pool)
-    .await
-    .expect("failed to seed signing key");
-    (sqlx::Row::try_get(&row, "id").unwrap(), signing_key)
-}
-
 /// Mirrors `crate::signature_gate::canonical_message` byte-for-byte.
 fn sign_connect(signing_key: &SigningKey, slug: &str, capabilities: &[&str]) -> String {
     use ed25519_dalek::Signer;
@@ -163,7 +143,7 @@ async fn a_integrator_with_activity_below_the_floor_reports_coarsened_not_exact_
     let base = common::server_url();
     let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
-    let (signing_key_id, signing_key) = seed_signing_key(&pool, identity_id).await;
+    let (signing_key_id, signing_key) = common::seed_signing_key(&pool, identity_id).await;
     let (slug, _) = register_unique_integrator(&http, &base).await;
 
     let connect_capabilities: [&str; 0] = [];
@@ -262,7 +242,7 @@ async fn a_integrator_with_activity_at_the_floor_reports_exact_counts() {
     let connect_capabilities: [&str; 0] = [];
     for _ in 0..5 {
         let (identity_id, token) = seed_identity_session(&pool).await;
-        let (signing_key_id, signing_key) = seed_signing_key(&pool, identity_id).await;
+        let (signing_key_id, signing_key) = common::seed_signing_key(&pool, identity_id).await;
         let connect = http
             .post(format!("{base}/integrations/{slug}/connect"))
             .bearer_auth(&token)

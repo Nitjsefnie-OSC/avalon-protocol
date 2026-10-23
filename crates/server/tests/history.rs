@@ -91,10 +91,6 @@ async fn seed_ledger_entry(
     .expect("failed to seed ledger entry");
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
 #[tokio::test]
 #[ignore]
 async fn my_history_returns_only_the_callers_own_events() {
@@ -110,7 +106,7 @@ async fn my_history_returns_only_the_callers_own_events() {
     seed_ledger_entry(&pool, bob_id, "identity.created", "created").await;
 
     let alice_history: serde_json::Value =
-        auth(http.get(format!("{base}/me/history")), &alice_token)
+        common::auth(http.get(format!("{base}/me/history")), &alice_token)
             .send()
             .await
             .expect("history request failed — is `make start` running?")
@@ -124,13 +120,14 @@ async fn my_history_returns_only_the_callers_own_events() {
         .unwrap()
         .contains(&alice_id.to_string())));
 
-    let bob_history: serde_json::Value = auth(http.get(format!("{base}/me/history")), &bob_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let bob_history: serde_json::Value =
+        common::auth(http.get(format!("{base}/me/history")), &bob_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     assert_eq!(bob_history.as_array().unwrap().len(), 1);
 
     // These rows carry junk (non-hex) entry_hash/prev_hash values by

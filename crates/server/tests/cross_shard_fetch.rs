@@ -30,12 +30,6 @@ use avalon_server::outbound_policy::OutboundPolicy;
 
 mod common;
 
-fn rp_origin() -> url::Url {
-    let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
 fn network_id() -> String {
     std::env::var("AVALON_NETWORK_ID").unwrap_or_else(|_| "avalon-dev-local".to_string())
 }
@@ -99,7 +93,7 @@ async fn register_identity(
     let ticket_id = start["ticket_id"].as_str().unwrap().to_string();
 
     let mut client = new_virtual_client();
-    let origin = rp_origin();
+    let origin = common::rp_origin();
     let creation_options: CredentialCreationOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client

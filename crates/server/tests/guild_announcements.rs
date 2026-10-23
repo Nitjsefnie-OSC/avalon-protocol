@@ -55,10 +55,6 @@ async fn seed_membership(
     .expect("failed to seed membership");
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
 fn unique_guild_body() -> serde_json::Value {
     let suffix = Uuid::new_v4().simple().to_string();
     serde_json::json!({
@@ -76,7 +72,7 @@ async fn create_guild_with_general_channel(
     base: &str,
     owner_token: &str,
 ) -> (Uuid, Uuid) {
-    let create = auth(http.post(format!("{base}/guilds")), owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -85,7 +81,7 @@ async fn create_guild_with_general_channel(
     let guild: serde_json::Value = create.json().await.unwrap();
     let guild_id: Uuid = guild["id"].as_str().unwrap().parse().unwrap();
 
-    let channels: serde_json::Value = auth(
+    let channels: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/channels")),
         owner_token,
     )
@@ -114,7 +110,7 @@ async fn set_announcement_only(
     channel_id: Uuid,
     announcement_only: bool,
 ) {
-    let resp = auth(
+    let resp = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         token,
     )
@@ -136,7 +132,7 @@ async fn post_message(
     channel_id: Uuid,
     body: &str,
 ) {
-    let resp = auth(
+    let resp = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -154,7 +150,7 @@ async fn my_guild_announcements(
     base: &str,
     token: &str,
 ) -> Vec<serde_json::Value> {
-    auth(http.get(format!("{base}/me/guild-announcements")), token)
+    common::auth(http.get(format!("{base}/me/guild-announcements")), token)
         .send()
         .await
         .unwrap()

@@ -8,9 +8,9 @@
 //! atomically (`guilds::create_guild`) — seeding it again would collide on
 //! `indexer_guild_members`'s `(guild_id, identity_id)` primary key.
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+mod guild_support;
+
+use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -36,16 +36,6 @@ async fn seed_signing_key(
     .expect("failed to seed signing key");
     let key_id: Uuid = sqlx::Row::try_get(&row, "id").unwrap();
     (key_id, signing_key)
-}
-
-/// Mirrors `crate::signature_gate::canonical_message` byte-for-byte.
-fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> String {
-    let mut message = format!("avalon:{action_tag}:v1");
-    for field in fields {
-        message.push(':');
-        message.push_str(field);
-    }
-    BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
 }
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
@@ -98,19 +88,6 @@ async fn seed_membership(
     .expect("failed to seed guild membership — has issue #21's migration landed?");
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
-fn unique_guild_body() -> serde_json::Value {
-    let suffix = Uuid::new_v4().simple().to_string();
-    serde_json::json!({
-        "name": format!("Test Guild {}", &suffix[..8]),
-        "tag": suffix[..5].to_uppercase(),
-        "description": "a guild created by an integration test",
-    })
-}
-
 /// Creates a guild as `owner_token`'s identity and returns its id, along
 /// with the id of its default `general` channel (created by
 /// `guilds::create_guild` itself — see issue #22's `create_guild` edit).
@@ -119,8 +96,8 @@ async fn create_guild_with_general_channel(
     base: &str,
     owner_token: &str,
 ) -> (String, String) {
-    let create = auth(http.post(format!("{base}/guilds")), owner_token)
-        .json(&unique_guild_body())
+    let create = common::auth(http.post(format!("{base}/guilds")), owner_token)
+        .json(&guild_support::unique_guild_body())
         .send()
         .await
         .expect("create guild failed — is `make start` running?");
@@ -128,7 +105,7 @@ async fn create_guild_with_general_channel(
     let guild: serde_json::Value = create.json().await.unwrap();
     let guild_id = guild["id"].as_str().unwrap().to_string();
 
-    let channels: serde_json::Value = auth(
+    let channels: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/channels")),
         owner_token,
     )
@@ -191,7 +168,7 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
     // Freshly created channels have no topic.
-    let channels: serde_json::Value = auth(
+    let channels: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/channels")),
         &owner_token,
     )
@@ -210,7 +187,7 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
     assert!(general["topic"].is_null());
 
     // Set a topic.
-    let updated: serde_json::Value = auth(
+    let updated: serde_json::Value = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &owner_token,
     )
@@ -226,7 +203,7 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
     assert_eq!(updated["announcement_only"], false);
 
     // Over the length cap is rejected, and leaves the existing topic alone.
-    let too_long = auth(
+    let too_long = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &owner_token,
     )
@@ -236,7 +213,7 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
     .unwrap();
     assert_eq!(too_long.status(), reqwest::StatusCode::BAD_REQUEST);
 
-    let unchanged: serde_json::Value = auth(
+    let unchanged: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/channels")),
         &owner_token,
     )
@@ -255,7 +232,7 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
     assert_eq!(general_after["topic"], "patch notes & raid planning");
 
     // Clearing (empty string) normalizes to null.
-    let cleared: serde_json::Value = auth(
+    let cleared: serde_json::Value = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &owner_token,
     )
@@ -270,7 +247,7 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
 
     // Omitting `topic` entirely leaves whatever was already there untouched
     // (a rename with no `topic` key at all, not an implicit clear).
-    let renamed: serde_json::Value = auth(
+    let renamed: serde_json::Value = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &owner_token,
     )
@@ -283,7 +260,7 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
     .unwrap();
     assert_eq!(renamed["topic"], "back again");
 
-    let rename_only: serde_json::Value = auth(
+    let rename_only: serde_json::Value = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &owner_token,
     )
@@ -311,7 +288,7 @@ async fn a_member_can_send_and_list_messages_in_order() {
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
     for body in ["first", "second", "third"] {
-        let send = auth(
+        let send = common::auth(
             http.post(format!(
                 "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
             )),
@@ -324,7 +301,7 @@ async fn a_member_can_send_and_list_messages_in_order() {
         assert!(send.status().is_success(), "{:?}", send.status());
     }
 
-    let list: serde_json::Value = auth(
+    let list: serde_json::Value = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -356,7 +333,7 @@ async fn pagination_walks_older_pages_via_before_cursor() {
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
     for i in 0..5 {
-        auth(
+        common::auth(
             http.post(format!(
                 "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
             )),
@@ -368,7 +345,7 @@ async fn pagination_walks_older_pages_via_before_cursor() {
         .unwrap();
     }
 
-    let first_page: serde_json::Value = auth(
+    let first_page: serde_json::Value = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages?limit=2"
         )),
@@ -389,7 +366,7 @@ async fn pagination_walks_older_pages_via_before_cursor() {
     assert_eq!(first_page_ids.len(), 2);
 
     let cursor = first_page_ids[1];
-    let second_page: serde_json::Value = auth(
+    let second_page: serde_json::Value = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages?limit=2&before={cursor}"
         )),
@@ -423,7 +400,7 @@ async fn a_non_member_cannot_read_or_send_messages() {
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
-    let list = auth(
+    let list = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -434,7 +411,7 @@ async fn a_non_member_cannot_read_or_send_messages() {
     .unwrap();
     assert_eq!(list.status(), reqwest::StatusCode::FORBIDDEN);
 
-    let send = auth(
+    let send = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -456,7 +433,7 @@ async fn an_archived_channel_rejects_new_posts() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
-    let archive = auth(
+    let archive = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/archive"
         )),
@@ -471,7 +448,7 @@ async fn an_archived_channel_rejects_new_posts() {
         true
     );
 
-    let send = auth(
+    let send = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -493,7 +470,7 @@ async fn manage_channels_can_hard_delete_a_message() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
-    let send = auth(
+    let send = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -506,7 +483,7 @@ async fn manage_channels_can_hard_delete_a_message() {
     let message: serde_json::Value = send.json().await.unwrap();
     let message_id = message["id"].as_str().unwrap();
 
-    let delete = auth(
+    let delete = common::auth(
         http.delete(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages/{message_id}"
         )),
@@ -517,7 +494,7 @@ async fn manage_channels_can_hard_delete_a_message() {
     .unwrap();
     assert!(delete.status().is_success(), "{:?}", delete.status());
 
-    let list: serde_json::Value = auth(
+    let list: serde_json::Value = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -548,7 +525,7 @@ async fn a_message_body_over_the_length_cap_is_rejected() {
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
     let too_long = "a".repeat(4001);
-    let send = auth(
+    let send = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -580,7 +557,7 @@ async fn set_override(
     allow: bool,
 ) {
     let (signing_key_id, signing_key) = seed_signing_key(pool, actor_id).await;
-    let signature = sign_action(
+    let signature = common::sign_action(
         &signing_key,
         "guild.permission_override.set",
         &[
@@ -592,7 +569,7 @@ async fn set_override(
             &allow.to_string(),
         ],
     );
-    let resp = auth(
+    let resp = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/permission-overrides")),
         token,
     )
@@ -621,7 +598,7 @@ async fn set_announcement_only(
     channel_id: &str,
     announcement_only: bool,
 ) {
-    let resp = auth(
+    let resp = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         token,
     )
@@ -650,7 +627,7 @@ async fn announcement_only_channel_blocks_a_plain_member_base_only() {
 
     // Base-only: the `member` role has no `channel_post` permission and
     // no override exists yet — posting is rejected.
-    let send = auth(
+    let send = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -692,7 +669,7 @@ async fn announcement_only_channel_grant_override_allows_a_plain_member_to_post(
     )
     .await;
 
-    let send = auth(
+    let send = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -719,7 +696,7 @@ async fn deny_override_blocks_an_officer_from_managing_one_specific_channel() {
     seed_membership(&pool, Uuid::parse_str(&guild_id).unwrap(), officer_id, 1).await;
 
     // A rename by the officer succeeds before any override exists.
-    let rename = auth(
+    let rename = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &officer_token,
     )
@@ -746,7 +723,7 @@ async fn deny_override_blocks_an_officer_from_managing_one_specific_channel() {
     )
     .await;
 
-    let rename_again = auth(
+    let rename_again = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &officer_token,
     )
@@ -784,7 +761,7 @@ async fn owner_bypasses_a_deny_override_on_a_channel() {
     )
     .await;
 
-    let rename = auth(
+    let rename = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         &owner_token,
     )
@@ -805,7 +782,7 @@ async fn set_guild_public(
     guild_id: &str,
     value: bool,
 ) {
-    let response = auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
+    let response = common::auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
         .json(&serde_json::json!({ "public": value }))
         .send()
         .await
@@ -821,7 +798,7 @@ async fn set_channel_public(
     channel_id: &str,
     value: bool,
 ) {
-    let response = auth(
+    let response = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/channels/{channel_id}")),
         token,
     )
@@ -844,7 +821,7 @@ async fn a_public_channel_is_visible_to_a_non_member_of_a_public_guild() {
         create_guild_with_general_channel(&http, &base, &owner_token).await;
 
     // A second, non-public channel the stranger should never see.
-    let create_private = auth(
+    let create_private = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/channels")),
         &owner_token,
     )
@@ -856,7 +833,7 @@ async fn a_public_channel_is_visible_to_a_non_member_of_a_public_guild() {
 
     // Guild not public yet: the stranger is 403'd outright, unchanged from
     // before this ticket.
-    let before = auth(
+    let before = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/channels")),
         &stranger_token,
     )
@@ -876,7 +853,7 @@ async fn a_public_channel_is_visible_to_a_non_member_of_a_public_guild() {
     )
     .await;
 
-    let after: Vec<serde_json::Value> = auth(
+    let after: Vec<serde_json::Value> = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/channels")),
         &stranger_token,
     )
@@ -909,7 +886,7 @@ async fn view_details_denied_on_a_channel_blocks_message_reads_but_not_listing()
     seed_membership(&pool, Uuid::parse_str(&guild_id).unwrap(), member_id, 2).await;
 
     // Before any override: the member can already read (empty) history.
-    let before = auth(
+    let before = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -936,7 +913,7 @@ async fn view_details_denied_on_a_channel_blocks_message_reads_but_not_listing()
     .await;
 
     // Still listed — existence stays visible.
-    let list: Vec<serde_json::Value> = auth(
+    let list: Vec<serde_json::Value> = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/channels")),
         &member_token,
     )
@@ -949,7 +926,7 @@ async fn view_details_denied_on_a_channel_blocks_message_reads_but_not_listing()
     assert!(list.iter().any(|c| c["id"] == channel_id));
 
     // But message content is now gated.
-    let after = auth(
+    let after = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -961,7 +938,7 @@ async fn view_details_denied_on_a_channel_blocks_message_reads_but_not_listing()
     assert_eq!(after.status(), reqwest::StatusCode::FORBIDDEN);
 
     // The owner is unaffected.
-    let owner_read = auth(
+    let owner_read = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),
@@ -989,7 +966,7 @@ async fn setting_a_permission_override_without_a_signature_is_rejected() {
     seed_membership(&pool, Uuid::parse_str(&guild_id).unwrap(), member_id, 2).await;
     set_announcement_only(&http, &base, &owner_token, &guild_id, &channel_id, true).await;
 
-    let unsigned = auth(
+    let unsigned = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/permission-overrides")),
         &owner_token,
     )
@@ -1007,7 +984,7 @@ async fn setting_a_permission_override_without_a_signature_is_rejected() {
     let body: serde_json::Value = unsigned.json().await.unwrap();
     assert_eq!(body["code"], "NO_REGISTERED_SIGNING_KEY");
 
-    let send = auth(
+    let send = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/channels/{channel_id}/messages"
         )),

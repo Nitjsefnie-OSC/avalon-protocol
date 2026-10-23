@@ -14,12 +14,6 @@ use sqlx::{PgPool, Row};
 
 mod common;
 
-fn rp_origin() -> url::Url {
-    let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
 type VirtualClient = Client<
     MemoryStore,
     MockUserValidationMethod,
@@ -75,7 +69,7 @@ async fn create_identity_with_one_passkey(
     let ticket_id = start["ticket_id"].as_str().unwrap().to_string();
 
     let mut client = new_virtual_client(expected_ceremonies);
-    let origin = rp_origin();
+    let origin = common::rp_origin();
     let creation_options: CredentialCreationOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client
@@ -201,7 +195,7 @@ async fn registering_and_revoking_a_second_passkey_updates_the_mirror_projection
         .await
         .unwrap();
     let ticket_id = start["ticket_id"].as_str().unwrap().to_string();
-    let origin = rp_origin();
+    let origin = common::rp_origin();
     let request_options: CredentialRequestOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let assertion = client_a

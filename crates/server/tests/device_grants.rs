@@ -86,10 +86,6 @@ async fn seed_signing_key(
     (key_id, signing_key)
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
 /// The 32-byte chain head hash behind a request's lowercase-hex `prev_hash`.
 fn head_bytes(prev_hash: Option<&str>) -> Option<[u8; 32]> {
     prev_hash.map(|h| hex::decode(h).unwrap().try_into().unwrap())
@@ -173,13 +169,14 @@ async fn a_grant_approved_by_a_valid_trusted_key_succeeds_and_the_new_key_is_reg
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (trusted_key_id, trusted_key) = seed_signing_key(&pool, identity_id).await;
 
-    let devices_before: serde_json::Value = auth(http.get(format!("{base}/me/devices")), &token)
-        .send()
-        .await
-        .expect("list devices failed — is `make start` running?")
-        .json()
-        .await
-        .unwrap();
+    let devices_before: serde_json::Value =
+        common::auth(http.get(format!("{base}/me/devices")), &token)
+            .send()
+            .await
+            .expect("list devices failed — is `make start` running?")
+            .json()
+            .await
+            .unwrap();
     assert_eq!(devices_before.as_array().unwrap().len(), 1);
 
     let new_device_signing_key = SigningKey::generate(&mut rand::rng());
@@ -189,14 +186,15 @@ async fn a_grant_approved_by_a_valid_trusted_key_succeeds_and_the_new_key_is_reg
         "requested_signing_public_key": BASE64.encode(new_device_public_key),
         "device_label": "second device",
     });
-    let grant: serde_json::Value = auth(http.post(format!("{base}/me/devices/grants")), &token)
-        .json(&request_body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let grant: serde_json::Value =
+        common::auth(http.post(format!("{base}/me/devices/grants")), &token)
+            .json(&request_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     assert_eq!(grant["status"], "pending");
     let grant_id: Uuid = grant["id"].as_str().unwrap().parse().unwrap();
 
@@ -208,7 +206,7 @@ async fn a_grant_approved_by_a_valid_trusted_key_succeeds_and_the_new_key_is_reg
         1,
         None,
     );
-    let approve = auth(
+    let approve = common::auth(
         http.post(format!("{base}/me/devices/grants/{grant_id}/approve")),
         &token,
     )
@@ -218,7 +216,7 @@ async fn a_grant_approved_by_a_valid_trusted_key_succeeds_and_the_new_key_is_reg
     .unwrap();
     assert!(approve.status().is_success(), "{:?}", approve.status());
 
-    let grant_after: serde_json::Value = auth(
+    let grant_after: serde_json::Value = common::auth(
         http.get(format!("{base}/me/devices/grants/{grant_id}")),
         &token,
     )
@@ -230,13 +228,14 @@ async fn a_grant_approved_by_a_valid_trusted_key_succeeds_and_the_new_key_is_reg
     .unwrap();
     assert_eq!(grant_after["status"], "approved");
 
-    let devices_after: serde_json::Value = auth(http.get(format!("{base}/me/devices")), &token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let devices_after: serde_json::Value =
+        common::auth(http.get(format!("{base}/me/devices")), &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     assert_eq!(devices_after.as_array().unwrap().len(), 2);
 }
 
@@ -261,14 +260,15 @@ async fn an_approval_attempt_from_a_revoked_key_is_rejected() {
         "requested_signing_public_key": BASE64.encode(new_device_public_key),
         "device_label": null,
     });
-    let grant: serde_json::Value = auth(http.post(format!("{base}/me/devices/grants")), &token)
-        .json(&request_body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let grant: serde_json::Value =
+        common::auth(http.post(format!("{base}/me/devices/grants")), &token)
+            .json(&request_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     let grant_id: Uuid = grant["id"].as_str().unwrap().parse().unwrap();
 
     let approve_body = approve_body_at(
@@ -279,7 +279,7 @@ async fn an_approval_attempt_from_a_revoked_key_is_rejected() {
         1,
         None,
     );
-    let approve = auth(
+    let approve = common::auth(
         http.post(format!("{base}/me/devices/grants/{grant_id}/approve")),
         &token,
     )
@@ -289,7 +289,7 @@ async fn an_approval_attempt_from_a_revoked_key_is_rejected() {
     .unwrap();
     assert_eq!(approve.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    let grant_after: serde_json::Value = auth(
+    let grant_after: serde_json::Value = common::auth(
         http.get(format!("{base}/me/devices/grants/{grant_id}")),
         &token,
     )
@@ -313,7 +313,7 @@ async fn revoking_one_device_does_not_affect_another() {
     let (key_a_id, _key_a) = seed_signing_key(&pool, identity_id).await;
     let (key_b_id, key_b) = seed_signing_key(&pool, identity_id).await;
 
-    let revoke = auth(
+    let revoke = common::auth(
         http.post(format!("{base}/me/devices/{key_a_id}/revoke")),
         &token,
     )
@@ -323,7 +323,7 @@ async fn revoking_one_device_does_not_affect_another() {
     .unwrap();
     assert!(revoke.status().is_success(), "{:?}", revoke.status());
 
-    let devices: serde_json::Value = auth(http.get(format!("{base}/me/devices")), &token)
+    let devices: serde_json::Value = common::auth(http.get(format!("{base}/me/devices")), &token)
         .send()
         .await
         .unwrap()
@@ -344,7 +344,7 @@ async fn revoking_one_device_does_not_affect_another() {
 
     // Revoking again should be a no-op failure, not a second success — the
     // row is already revoked.
-    let second_revoke = auth(
+    let second_revoke = common::auth(
         http.post(format!("{base}/me/devices/{key_a_id}/revoke")),
         &token,
     )
@@ -366,7 +366,7 @@ async fn a_device_can_be_renamed_and_the_rename_is_scoped_to_its_own_identity() 
     let (key_id, _key) = seed_signing_key(&pool, identity_a).await;
     let (_identity_b, token_b) = seed_identity_session(&pool).await;
 
-    let rename = auth(http.patch(format!("{base}/me/devices/{key_id}")), &token_a)
+    let rename = common::auth(http.patch(format!("{base}/me/devices/{key_id}")), &token_a)
         .json(&serde_json::json!({ "label": "Renamed device" }))
         .send()
         .await
@@ -375,7 +375,7 @@ async fn a_device_can_be_renamed_and_the_rename_is_scoped_to_its_own_identity() 
     let renamed: serde_json::Value = rename.json().await.unwrap();
     assert_eq!(renamed["label"], "Renamed device");
 
-    let devices: serde_json::Value = auth(http.get(format!("{base}/me/devices")), &token_a)
+    let devices: serde_json::Value = common::auth(http.get(format!("{base}/me/devices")), &token_a)
         .send()
         .await
         .unwrap()
@@ -391,11 +391,12 @@ async fn a_device_can_be_renamed_and_the_rename_is_scoped_to_its_own_identity() 
     assert_eq!(device["label"], "Renamed device");
 
     // A different identity's session can't rename someone else's device.
-    let cross_identity_rename = auth(http.patch(format!("{base}/me/devices/{key_id}")), &token_b)
-        .json(&serde_json::json!({ "label": "Hijacked" }))
-        .send()
-        .await
-        .unwrap();
+    let cross_identity_rename =
+        common::auth(http.patch(format!("{base}/me/devices/{key_id}")), &token_b)
+            .json(&serde_json::json!({ "label": "Hijacked" }))
+            .send()
+            .await
+            .unwrap();
     assert_eq!(
         cross_identity_rename.status(),
         reqwest::StatusCode::NOT_FOUND
@@ -415,7 +416,7 @@ async fn a_revocation_signed_by_another_identitys_key_or_a_revoked_key_is_refuse
     let (other_identity, _other_token) = seed_identity_session(&pool).await;
     let (outsider_key_id, outsider_key) = seed_signing_key(&pool, other_identity).await;
 
-    let by_outsider = auth(
+    let by_outsider = common::auth(
         http.post(format!("{base}/me/devices/{key_a_id}/revoke")),
         &token,
     )
@@ -434,7 +435,7 @@ async fn a_revocation_signed_by_another_identitys_key_or_a_revoked_key_is_refuse
         by_outsider.status()
     );
 
-    let wrong_signature = auth(
+    let wrong_signature = common::auth(
         http.post(format!("{base}/me/devices/{key_a_id}/revoke")),
         &token,
     )
@@ -448,7 +449,7 @@ async fn a_revocation_signed_by_another_identitys_key_or_a_revoked_key_is_refuse
         "a signature over a different target must not authorize this revocation"
     );
 
-    let own = auth(
+    let own = common::auth(
         http.post(format!("{base}/me/devices/{key_a_id}/revoke")),
         &token,
     )
@@ -468,7 +469,7 @@ async fn the_last_active_signing_key_cannot_be_revoked() {
 
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (key_id, key) = seed_signing_key(&pool, identity_id).await;
-    let response = auth(
+    let response = common::auth(
         http.post(format!("{base}/me/devices/{key_id}/revoke")),
         &token,
     )
@@ -499,13 +500,13 @@ async fn two_keys_revoking_each_other_concurrently_leave_one_active() {
         .fetch_all(&mut *blocker)
         .await
         .unwrap();
-    let a_revokes_b = auth(
+    let a_revokes_b = common::auth(
         http.post(format!("{base}/me/devices/{key_b_id}/revoke")),
         &token,
     )
     .json(&revoke_body(identity_id, key_b_id, key_a_id, &key_a))
     .send();
-    let b_revokes_a = auth(
+    let b_revokes_a = common::auth(
         http.post(format!("{base}/me/devices/{key_a_id}/revoke")),
         &token,
     )
@@ -548,7 +549,7 @@ async fn two_keys_revoking_each_other_concurrently_leave_one_active() {
 }
 
 async fn request_grant(http: &reqwest::Client, token: &str, public_key: &[u8; 32]) -> Uuid {
-    let grant: serde_json::Value = auth(
+    let grant: serde_json::Value = common::auth(
         http.post(format!("{}/me/devices/grants", common::server_url())),
         token,
     )
@@ -592,7 +593,7 @@ async fn a_key_event_signed_at_a_stale_position_is_refused_with_the_head_and_res
             seq,
             prev,
         );
-        auth(
+        common::auth(
             http.post(format!("{base}/me/devices/grants/{grant_id}/approve")),
             &token,
         )
@@ -613,7 +614,7 @@ async fn a_key_event_signed_at_a_stale_position_is_refused_with_the_head_and_res
     assert_eq!(body["head_seq"], 1);
     let head = body["head_hash"].as_str().unwrap().to_string();
     // Nothing changed, and signing at the returned head succeeds.
-    let devices: serde_json::Value = auth(http.get(format!("{base}/me/devices")), &token)
+    let devices: serde_json::Value = common::auth(http.get(format!("{base}/me/devices")), &token)
         .send()
         .await
         .unwrap()
@@ -631,7 +632,7 @@ async fn a_key_event_signed_at_a_stale_position_is_refused_with_the_head_and_res
 }
 
 async fn devices_ids(http: &reqwest::Client, token: &str) -> Vec<String> {
-    let devices: serde_json::Value = auth(
+    let devices: serde_json::Value = common::auth(
         http.get(format!("{}/me/devices", common::server_url())),
         token,
     )
@@ -663,7 +664,7 @@ async fn a_signature_does_not_carry_over_to_another_approver_id_position_or_malf
         .to_bytes();
     let grant_id = request_grant(&http, &token, &device).await;
     let post = |body: serde_json::Value| {
-        auth(
+        common::auth(
             http.post(format!("{base}/me/devices/grants/{grant_id}/approve")),
             &token,
         )
@@ -708,7 +709,7 @@ async fn a_revocation_signed_at_a_stale_position_is_refused_with_the_head() {
     let (b_id, b) = seed_signing_key(&pool, identity_id).await;
     let (c_id, _c) = seed_signing_key(&pool, identity_id).await;
     let revoke = |target: Uuid, body: serde_json::Value| {
-        auth(
+        common::auth(
             http.post(format!("{base}/me/devices/{target}/revoke")),
             &token,
         )
@@ -788,7 +789,7 @@ async fn two_concurrent_approvals_at_the_same_head_leave_one_and_a_stale_refusal
             1,
             None,
         );
-        auth(
+        common::auth(
             http.post(format!("{base}/me/devices/grants/{}/approve", grants[i])),
             &token,
         )
@@ -811,7 +812,7 @@ async fn two_concurrent_revocations_at_the_same_head_leave_one_and_a_stale_refus
     let (c_id, c) = seed_signing_key(&pool, identity_id).await;
     let send = |target: Uuid| {
         let body = revoke_body_at(identity_id, target, c_id, &c, 1, None);
-        auth(
+        common::auth(
             http.post(format!("{base}/me/devices/{target}/revoke")),
             &token,
         )

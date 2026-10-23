@@ -37,12 +37,6 @@ fn hub_origin() -> String {
         .unwrap_or_else(|| "http://localhost:5173".to_string())
 }
 
-fn rp_origin() -> url::Url {
-    let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
 /// Registers a fresh identity and returns a logged-in session token.
 async fn create_identity_and_log_in(http: &reqwest::Client, base: &str) -> String {
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -70,7 +64,7 @@ async fn create_identity_and_log_in(http: &reqwest::Client, base: &str) -> Strin
         passkey_crypto::AvailableBackend,
     ))
     .allows_insecure_localhost(true);
-    let origin = rp_origin();
+    let origin = common::rp_origin();
     let creation_options: CredentialCreationOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client

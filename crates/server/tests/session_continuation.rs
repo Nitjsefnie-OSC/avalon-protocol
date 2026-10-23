@@ -15,9 +15,7 @@
 //! `avalon-docs/protocol/identity.md`'s session-continuation section.
 
 use ed25519_dalek::{Signer, SigningKey};
-use passkey_authenticator::{Authenticator, MemoryStore, MockUserValidationMethod};
-use passkey_client::{Client, DefaultClientData, Origin};
-use passkey_types::ctap2::Aaguid;
+use passkey_client::{DefaultClientData, Origin};
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
 use uuid::Uuid;
 
@@ -27,30 +25,6 @@ mod common;
 
 fn network_id() -> String {
     std::env::var("AVALON_NETWORK_ID").unwrap_or_else(|_| "avalon-dev-local".to_string())
-}
-
-fn rp_origin() -> url::Url {
-    let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
-type VirtualClient = Client<
-    MemoryStore,
-    MockUserValidationMethod,
-    passkey_crypto::AvailableBackend,
-    public_suffix::PublicSuffixList,
-    (),
->;
-
-fn new_virtual_client() -> VirtualClient {
-    let authenticator = Authenticator::new(
-        Aaguid::new_empty(),
-        MemoryStore::new(),
-        MockUserValidationMethod::verified_user(2),
-        passkey_crypto::AvailableBackend,
-    );
-    Client::new(authenticator).allows_insecure_localhost(true)
 }
 
 /// Registers a brand-new identity, returning its id, a logged-in session
@@ -82,8 +56,8 @@ async fn create_identity_and_log_in(
         .unwrap();
     let ticket_id = start["ticket_id"].as_str().unwrap().to_string();
 
-    let mut client = new_virtual_client();
-    let origin = rp_origin();
+    let mut client = common::new_virtual_client();
+    let origin = common::rp_origin();
     let creation_options: CredentialCreationOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client

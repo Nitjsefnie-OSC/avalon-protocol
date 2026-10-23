@@ -5,9 +5,9 @@
 //! Seeds identities/sessions/membership directly via SQL, same pattern
 //! `crates/server/tests/guild_channels.rs` uses.
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+mod guild_support;
+
+use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -33,16 +33,6 @@ async fn seed_signing_key(
     .expect("failed to seed signing key");
     let key_id: Uuid = sqlx::Row::try_get(&row, "id").unwrap();
     (key_id, signing_key)
-}
-
-/// Mirrors `crate::signature_gate::canonical_message` byte-for-byte.
-fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> String {
-    let mut message = format!("avalon:{action_tag}:v1");
-    for field in fields {
-        message.push(':');
-        message.push_str(field);
-    }
-    BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
 }
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
@@ -92,27 +82,14 @@ async fn seed_membership(
     .expect("failed to seed guild membership");
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
-fn unique_guild_body() -> serde_json::Value {
-    let suffix = Uuid::new_v4().simple().to_string();
-    serde_json::json!({
-        "name": format!("Test Guild {}", &suffix[..8]),
-        "tag": suffix[..5].to_uppercase(),
-        "description": "a guild created by an integration test",
-    })
-}
-
 /// Creates a guild as `owner_token`'s identity and returns the guild id.
 /// `POST /guilds` already makes the creator a real owner `indexer_guild_members`
 /// row atomically (`guilds::create_guild`) — no separate seed needed, and
 /// seeding it again would collide on `indexer_guild_members`'s `(guild_id,
 /// identity_id)` primary key.
 async fn create_guild_with_owner(http: &reqwest::Client, base: &str, owner_token: &str) -> String {
-    let create = auth(http.post(format!("{base}/guilds")), owner_token)
-        .json(&unique_guild_body())
+    let create = common::auth(http.post(format!("{base}/guilds")), owner_token)
+        .json(&guild_support::unique_guild_body())
         .send()
         .await
         .expect("create guild failed — is `make start` running?");
@@ -144,7 +121,7 @@ async fn set_guild_public(
     guild_id: &str,
     value: bool,
 ) {
-    let response = auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
+    let response = common::auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
         .json(&serde_json::json!({ "public": value }))
         .send()
         .await
@@ -169,7 +146,7 @@ async fn create_rsvp_as_two_members_and_list_shows_both_responses() {
     )
     .await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -181,7 +158,7 @@ async fn create_rsvp_as_two_members_and_list_shows_both_responses() {
     let event: serde_json::Value = create.json().await.unwrap();
     let event_id = event["id"].as_str().unwrap();
 
-    let owner_rsvp = auth(
+    let owner_rsvp = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvp")),
         &owner_token,
     )
@@ -195,7 +172,7 @@ async fn create_rsvp_as_two_members_and_list_shows_both_responses() {
         owner_rsvp.status()
     );
 
-    let member_rsvp = auth(
+    let member_rsvp = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvp")),
         &member_token,
     )
@@ -209,7 +186,7 @@ async fn create_rsvp_as_two_members_and_list_shows_both_responses() {
         member_rsvp.status()
     );
 
-    let list: serde_json::Value = auth(
+    let list: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -232,7 +209,7 @@ async fn create_rsvp_as_two_members_and_list_shows_both_responses() {
     // the member's "maybe" — my_rsvp is always caller-scoped.
     assert_eq!(listed["my_rsvp"], "going");
 
-    let member_list: serde_json::Value = auth(
+    let member_list: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &member_token,
     )
@@ -259,7 +236,7 @@ async fn my_rsvp_is_null_until_the_caller_responds() {
     let (_owner_id, owner_token) = seed_identity_session(&common::test_pool().await).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -271,7 +248,7 @@ async fn my_rsvp_is_null_until_the_caller_responds() {
     let event_id = event["id"].as_str().unwrap();
     assert_eq!(event["my_rsvp"], serde_json::Value::Null);
 
-    let list: serde_json::Value = auth(
+    let list: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -299,7 +276,7 @@ async fn rsvp_is_idempotent_per_event_and_identity() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -311,7 +288,7 @@ async fn rsvp_is_idempotent_per_event_and_identity() {
     let event_id = event["id"].as_str().unwrap();
 
     for status in ["going", "maybe", "not_going"] {
-        let rsvp = auth(
+        let rsvp = common::auth(
             http.put(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvp")),
             &owner_token,
         )
@@ -322,7 +299,7 @@ async fn rsvp_is_idempotent_per_event_and_identity() {
         assert!(rsvp.status().is_success(), "{:?}", rsvp.status());
     }
 
-    let list: serde_json::Value = auth(
+    let list: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -354,7 +331,7 @@ async fn deleting_an_event_removes_its_rsvps() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -365,7 +342,7 @@ async fn deleting_an_event_removes_its_rsvps() {
     let event: serde_json::Value = create.json().await.unwrap();
     let event_id = event["id"].as_str().unwrap().to_string();
 
-    auth(
+    common::auth(
         http.put(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvp")),
         &owner_token,
     )
@@ -374,7 +351,7 @@ async fn deleting_an_event_removes_its_rsvps() {
     .await
     .unwrap();
 
-    let delete = auth(
+    let delete = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/events/{event_id}")),
         &owner_token,
     )
@@ -402,7 +379,7 @@ async fn a_non_member_cannot_view_or_rsvp() {
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -413,7 +390,7 @@ async fn a_non_member_cannot_view_or_rsvp() {
     let event: serde_json::Value = create.json().await.unwrap();
     let event_id = event["id"].as_str().unwrap();
 
-    let list = auth(
+    let list = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &outsider_token,
     )
@@ -422,7 +399,7 @@ async fn a_non_member_cannot_view_or_rsvp() {
     .unwrap();
     assert_eq!(list.status(), reqwest::StatusCode::FORBIDDEN);
 
-    let rsvp = auth(
+    let rsvp = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvp")),
         &outsider_token,
     )
@@ -450,7 +427,7 @@ async fn a_member_without_manage_channels_cannot_create_events() {
     )
     .await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &member_token,
     )
@@ -478,7 +455,7 @@ async fn set_override(
     allow: bool,
 ) {
     let (signing_key_id, signing_key) = seed_signing_key(pool, actor_id).await;
-    let signature = sign_action(
+    let signature = common::sign_action(
         &signing_key,
         "guild.permission_override.set",
         &[
@@ -490,7 +467,7 @@ async fn set_override(
             &allow.to_string(),
         ],
     );
-    let resp = auth(
+    let resp = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/permission-overrides")),
         token,
     )
@@ -516,7 +493,7 @@ async fn create_event(
     guild_id: &str,
     title: &str,
 ) -> String {
-    let create = auth(http.post(format!("{base}/guilds/{guild_id}/events")), token)
+    let create = common::auth(http.post(format!("{base}/guilds/{guild_id}/events")), token)
         .json(&event_body(title))
         .send()
         .await
@@ -541,7 +518,7 @@ async fn grant_override_lets_a_plain_member_manage_one_specific_event() {
 
     // Base-only: the plain member has no `event_manage` — an edit is
     // rejected before any override exists.
-    let edit_before = auth(
+    let edit_before = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/events/{event_id}")),
         &member_token,
     )
@@ -568,7 +545,7 @@ async fn grant_override_lets_a_plain_member_manage_one_specific_event() {
     )
     .await;
 
-    let edit_after = auth(
+    let edit_after = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/events/{event_id}")),
         &member_token,
     )
@@ -615,7 +592,7 @@ async fn deny_override_blocks_an_officer_from_deleting_one_specific_event() {
     )
     .await;
 
-    let delete = auth(
+    let delete = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/events/{event_id}")),
         &officer_token,
     )
@@ -651,7 +628,7 @@ async fn owner_bypasses_a_deny_override_on_an_event() {
     )
     .await;
 
-    let delete = auth(
+    let delete = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/events/{event_id}")),
         &owner_token,
     )
@@ -688,7 +665,7 @@ async fn override_on_a_deleted_event_is_inert_not_an_error() {
     )
     .await;
 
-    let delete = auth(
+    let delete = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/events/{event_id}")),
         &owner_token,
     )
@@ -700,7 +677,7 @@ async fn override_on_a_deleted_event_is_inert_not_an_error() {
     // The event (and, per the ticket's invariant, its now-orphaned
     // override row) is gone — a caller trying to act on it again gets a
     // plain 404, never a server error from a dangling override lookup.
-    let edit_after_delete = auth(
+    let edit_after_delete = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/events/{event_id}")),
         &member_token,
     )
@@ -728,7 +705,7 @@ async fn rsvp_roster_lists_every_response_with_identity_and_status() {
     )
     .await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -740,7 +717,7 @@ async fn rsvp_roster_lists_every_response_with_identity_and_status() {
     let event: serde_json::Value = create.json().await.unwrap();
     let event_id = event["id"].as_str().unwrap();
 
-    auth(
+    common::auth(
         http.put(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvp")),
         &owner_token,
     )
@@ -748,7 +725,7 @@ async fn rsvp_roster_lists_every_response_with_identity_and_status() {
     .send()
     .await
     .unwrap();
-    auth(
+    common::auth(
         http.put(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvp")),
         &member_token,
     )
@@ -757,7 +734,7 @@ async fn rsvp_roster_lists_every_response_with_identity_and_status() {
     .await
     .unwrap();
 
-    let roster = auth(
+    let roster = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvps")),
         &owner_token,
     )
@@ -792,7 +769,7 @@ async fn rsvp_roster_is_empty_when_nobody_has_responded() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -803,7 +780,7 @@ async fn rsvp_roster_is_empty_when_nobody_has_responded() {
     let event: serde_json::Value = create.json().await.unwrap();
     let event_id = event["id"].as_str().unwrap();
 
-    let roster = auth(
+    let roster = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvps")),
         &owner_token,
     )
@@ -825,7 +802,7 @@ async fn a_non_member_cannot_view_the_rsvp_roster() {
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -836,7 +813,7 @@ async fn a_non_member_cannot_view_the_rsvp_roster() {
     let event: serde_json::Value = create.json().await.unwrap();
     let event_id = event["id"].as_str().unwrap();
 
-    let roster = auth(
+    let roster = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events/{event_id}/rsvps")),
         &outsider_token,
     )
@@ -860,7 +837,7 @@ async fn requesting_another_guilds_event_id_under_a_different_guild_is_not_found
     let guild_a_id = create_guild_with_owner(&http, &base, &owner_a_token).await;
     let guild_b_id = create_guild_with_owner(&http, &base, &owner_b_token).await;
 
-    let create = auth(
+    let create = common::auth(
         http.post(format!("{base}/guilds/{guild_a_id}/events")),
         &owner_a_token,
     )
@@ -871,7 +848,7 @@ async fn requesting_another_guilds_event_id_under_a_different_guild_is_not_found
     let event: serde_json::Value = create.json().await.unwrap();
     let event_id = event["id"].as_str().unwrap();
 
-    let cross_guild = auth(
+    let cross_guild = common::auth(
         http.get(format!(
             "{base}/guilds/{guild_b_id}/events/{event_id}/rsvps"
         )),
@@ -899,7 +876,7 @@ async fn a_non_member_of_a_public_guild_sees_only_public_events() {
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
-    let public_event = auth(
+    let public_event = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -916,7 +893,7 @@ async fn a_non_member_of_a_public_guild_sees_only_public_events() {
     let public_event_id = public_event["id"].as_str().unwrap().to_string();
     assert!(public_event["public"].as_bool().unwrap());
 
-    let private_event = auth(
+    let private_event = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -929,7 +906,7 @@ async fn a_non_member_of_a_public_guild_sees_only_public_events() {
 
     // Not yet public: the outsider is still 403'd, exactly like #391/#448's
     // "unchanged for a non-public guild" invariant.
-    let still_forbidden = auth(
+    let still_forbidden = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &outsider_token,
     )
@@ -940,7 +917,7 @@ async fn a_non_member_of_a_public_guild_sees_only_public_events() {
 
     set_guild_public(&http, &base, &owner_token, &guild_id, true).await;
 
-    let list = auth(
+    let list = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &outsider_token,
     )
@@ -957,7 +934,7 @@ async fn a_non_member_of_a_public_guild_sees_only_public_events() {
     );
 
     // Public only widens the list — RSVP and roster stay member-only.
-    let rsvp = auth(
+    let rsvp = common::auth(
         http.put(format!(
             "{base}/guilds/{guild_id}/events/{public_event_id}/rsvp"
         )),
@@ -972,7 +949,7 @@ async fn a_non_member_of_a_public_guild_sees_only_public_events() {
     // Turning `public` back off restores the 403, same as the roster
     // override's own "off restores today's behavior" invariant.
     set_guild_public(&http, &base, &owner_token, &guild_id, false).await;
-    let forbidden_again = auth(
+    let forbidden_again = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &outsider_token,
     )
@@ -996,7 +973,7 @@ async fn a_member_sees_every_event_regardless_of_public_flag() {
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
     seed_membership(&pool, guild_id.parse().unwrap(), member_id, 2).await;
 
-    auth(
+    common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -1004,7 +981,7 @@ async fn a_member_sees_every_event_regardless_of_public_flag() {
     .send()
     .await
     .unwrap();
-    auth(
+    common::auth(
         http.post(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -1014,7 +991,7 @@ async fn a_member_sees_every_event_regardless_of_public_flag() {
     .unwrap();
 
     // Guild is not `public` at all, and the member still sees both events.
-    let list = auth(
+    let list = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &member_token,
     )
@@ -1044,7 +1021,7 @@ async fn denying_view_on_one_event_hides_it_from_that_member_only() {
     let public_event_id = create_event(&http, &base, &owner_token, &guild_id, "Everyone").await;
 
     // Before any override: the member sees both.
-    let before: Vec<serde_json::Value> = auth(
+    let before: Vec<serde_json::Value> = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &member_token,
     )
@@ -1071,7 +1048,7 @@ async fn denying_view_on_one_event_hides_it_from_that_member_only() {
     )
     .await;
 
-    let after: Vec<serde_json::Value> = auth(
+    let after: Vec<serde_json::Value> = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &member_token,
     )
@@ -1089,7 +1066,7 @@ async fn denying_view_on_one_event_hides_it_from_that_member_only() {
     assert!(ids.contains(&public_event_id.as_str()));
 
     // The owner is unaffected by the override.
-    let owner_view: Vec<serde_json::Value> = auth(
+    let owner_view: Vec<serde_json::Value> = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )
@@ -1130,7 +1107,7 @@ async fn denying_view_details_leaves_the_event_visible_but_strips_its_content() 
     )
     .await;
 
-    let list: Vec<serde_json::Value> = auth(
+    let list: Vec<serde_json::Value> = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &member_token,
     )
@@ -1154,7 +1131,7 @@ async fn denying_view_details_leaves_the_event_visible_but_strips_its_content() 
     assert_eq!(event["rsvp_counts"]["not_going"], 0);
 
     // The owner still sees full detail.
-    let owner_list: Vec<serde_json::Value> = auth(
+    let owner_list: Vec<serde_json::Value> = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/events")),
         &owner_token,
     )

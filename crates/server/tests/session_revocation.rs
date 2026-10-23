@@ -22,12 +22,6 @@ fn network_id() -> String {
     std::env::var("AVALON_NETWORK_ID").unwrap_or_else(|_| "avalon-dev-local".to_string())
 }
 
-fn rp_origin() -> url::Url {
-    let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     PgPoolOptions::new()
@@ -120,15 +114,6 @@ async fn seed_signing_key(pool: &PgPool, identity_id: Identity) -> (Uuid, Signin
     (row.try_get("id").unwrap(), signing_key)
 }
 
-fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> String {
-    let mut message = format!("avalon:{action_tag}:v1");
-    for field in fields {
-        message.push(':');
-        message.push_str(field);
-    }
-    BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
-}
-
 async fn me_status(http: &reqwest::Client, token: &str) -> u16 {
     http.get(format!("{}/me", common::server_url()))
         .bearer_auth(token)
@@ -175,7 +160,7 @@ async fn create_identity_with_one_passkey(
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client
         .register(
-            Origin::from(&rp_origin()),
+            Origin::from(&common::rp_origin()),
             creation_options,
             DefaultClientData,
         )
@@ -222,7 +207,7 @@ async fn login(
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let assertion = client
         .authenticate(
-            Origin::from(&rp_origin()),
+            Origin::from(&common::rp_origin()),
             request_options,
             DefaultClientData,
         )
@@ -370,7 +355,7 @@ async fn revoking_a_passkey_ends_the_sessions_it_created_and_no_others() {
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client_b
         .register(
-            Origin::from(&rp_origin()),
+            Origin::from(&common::rp_origin()),
             creation_options,
             DefaultClientData,
         )
@@ -626,7 +611,7 @@ async fn pairing_stores_no_usable_secret_and_records_the_approving_key() {
             .unwrap();
     assert_eq!(stored_matches_plaintext, 0);
 
-    let signature = sign_action(
+    let signature = common::sign_action(
         &signer,
         "device_pairing.approve",
         &[&identity_id.to_string(), &user_code],
@@ -687,7 +672,7 @@ async fn an_approved_pairing_cannot_be_collected_after_it_expires() {
         .unwrap();
     let device_code = start["device_code"].as_str().unwrap().to_string();
     let user_code = start["user_code"].as_str().unwrap().to_string();
-    let signature = sign_action(
+    let signature = common::sign_action(
         &signer,
         "device_pairing.approve",
         &[&identity_id.to_string(), &user_code],
@@ -745,7 +730,7 @@ async fn start_and_approve_pairing(
         .await
         .unwrap();
     let user_code = start["user_code"].as_str().unwrap().to_string();
-    let signature = sign_action(
+    let signature = common::sign_action(
         signer,
         "device_pairing.approve",
         &[&identity_id.to_string(), &user_code],
@@ -909,7 +894,7 @@ async fn a_login_whose_passkey_is_revoked_mid_ceremony_mints_nothing() {
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let assertion = client
         .authenticate(
-            Origin::from(&rp_origin()),
+            Origin::from(&common::rp_origin()),
             request_options,
             DefaultClientData,
         )

@@ -17,9 +17,8 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use passkey_authenticator::{Authenticator, MemoryStore, MockUserValidationMethod};
+use passkey_authenticator::{MemoryStore, MockUserValidationMethod};
 use passkey_client::{Client, DefaultClientData, Origin};
-use passkey_types::ctap2::Aaguid;
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -47,22 +46,6 @@ async fn seed_signing_key(
     (key_id, signing_key)
 }
 
-/// Mirrors `crate::signature_gate::canonical_message` byte-for-byte.
-fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> String {
-    let mut message = format!("avalon:{action_tag}:v1");
-    for field in fields {
-        message.push(':');
-        message.push_str(field);
-    }
-    BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
-}
-
-fn rp_origin() -> url::Url {
-    let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
-    url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
 /// Named so `Client`'s registration/authentication ceremony state can be
 /// carried across `await` points and function boundaries in this file —
 /// the TLD-verifier type parameter (`public_suffix::PublicSuffixList`) has
@@ -76,16 +59,6 @@ type VirtualClient = Client<
     public_suffix::PublicSuffixList,
     (),
 >;
-
-fn new_virtual_client() -> VirtualClient {
-    let authenticator = Authenticator::new(
-        Aaguid::new_empty(),
-        MemoryStore::new(),
-        MockUserValidationMethod::verified_user(2),
-        passkey_crypto::AvailableBackend,
-    );
-    Client::new(authenticator).allows_insecure_localhost(true)
-}
 
 /// Registers a brand-new identity with exactly one passkey, entirely via
 /// real HTTP against the running server (the same `/identities/register/*`
@@ -117,8 +90,8 @@ async fn create_identity_with_one_passkey(
         .unwrap();
     let ticket_id = start["ticket_id"].as_str().unwrap().to_string();
 
-    let mut client = new_virtual_client();
-    let origin = rp_origin();
+    let mut client = common::new_virtual_client();
+    let origin = common::rp_origin();
     let creation_options: CredentialCreationOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client
@@ -170,7 +143,7 @@ async fn login_with_client(
         .unwrap();
     let ticket_id = start["ticket_id"].as_str().unwrap().to_string();
 
-    let origin = rp_origin();
+    let origin = common::rp_origin();
     let request_options: CredentialRequestOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let assertion = client
@@ -196,10 +169,6 @@ async fn login_with_client(
     finish["token"].as_str().unwrap().to_string()
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
 #[tokio::test]
 #[ignore]
 async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
@@ -211,7 +180,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     let token = login_with_client(&http, &base, identity_id, &mut client_a).await;
 
     let passkeys_after_registration: serde_json::Value =
-        auth(http.get(format!("{base}/me/passkeys")), &token)
+        common::auth(http.get(format!("{base}/me/passkeys")), &token)
             .send()
             .await
             .unwrap()
@@ -222,7 +191,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
 
     // Add a second passkey — the authenticated flow #200 adds, distinct
     // from the unauthenticated account-creation ceremony above.
-    let start: serde_json::Value = auth(
+    let start: serde_json::Value = common::auth(
         http.post(format!("{base}/me/passkeys/register/start")),
         &token,
     )
@@ -234,8 +203,8 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     .unwrap();
     let ticket_id = start["ticket_id"].as_str().unwrap().to_string();
 
-    let mut client_b = new_virtual_client();
-    let origin = rp_origin();
+    let mut client_b = common::new_virtual_client();
+    let origin = common::rp_origin();
     let creation_options: CredentialCreationOptions =
         serde_json::from_value(start["challenge"].clone()).unwrap();
     let credential = client_b
@@ -248,7 +217,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
         "webauthn_credential": credential,
         "label": "second device",
     });
-    let added: serde_json::Value = auth(
+    let added: serde_json::Value = common::auth(
         http.post(format!("{base}/me/passkeys/register/finish")),
         &token,
     )
@@ -264,7 +233,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     assert_eq!(added["label"], "second device");
     let second_passkey_id = added["id"].as_str().unwrap().to_string();
 
-    let passkeys: serde_json::Value = auth(http.get(format!("{base}/me/passkeys")), &token)
+    let passkeys: serde_json::Value = common::auth(http.get(format!("{base}/me/passkeys")), &token)
         .send()
         .await
         .unwrap()
@@ -277,7 +246,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     // proving it's independently valid, not merely accepted alongside the
     // first.
     let token_via_b = login_with_client(&http, &base, identity_id, &mut client_b).await;
-    let me: serde_json::Value = auth(http.get(format!("{base}/me")), &token_via_b)
+    let me: serde_json::Value = common::auth(http.get(format!("{base}/me")), &token_via_b)
         .send()
         .await
         .unwrap()
@@ -289,7 +258,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     // Revoke the first passkey — two remain zero afterward is not the
     // case here (one will remain), so no ?confirm=true should be needed.
     let passkeys_before_revoke: serde_json::Value =
-        auth(http.get(format!("{base}/me/passkeys")), &token)
+        common::auth(http.get(format!("{base}/me/passkeys")), &token)
             .send()
             .await
             .unwrap()
@@ -306,7 +275,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
         .unwrap()
         .to_string();
 
-    let revoke_status = auth(
+    let revoke_status = common::auth(
         http.post(format!("{base}/me/passkeys/{first_passkey_id}/revoke")),
         &token,
     )
@@ -318,7 +287,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     assert!(revoke_status.is_success());
 
     let passkeys_after_revoke: serde_json::Value =
-        auth(http.get(format!("{base}/me/passkeys")), &token_via_b)
+        common::auth(http.get(format!("{base}/me/passkeys")), &token_via_b)
             .send()
             .await
             .unwrap()
@@ -329,7 +298,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
 
     // Still logged in via the surviving passkey's session — revoking the
     // *other* passkey never touched this session.
-    let me_still: serde_json::Value = auth(http.get(format!("{base}/me")), &token_via_b)
+    let me_still: serde_json::Value = common::auth(http.get(format!("{base}/me")), &token_via_b)
         .send()
         .await
         .unwrap()
@@ -343,7 +312,7 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     // bump) — the identity already has a signing key from registration
     // (`register_finish`'s own `event_signing_public_key`), so this is the
     // "has a key, didn't sign" case, not "no key at all".
-    let unsigned = auth(
+    let unsigned = common::auth(
         http.post(format!("{base}/me/passkeys/{second_passkey_id}/revoke")),
         &token_via_b,
     )
@@ -356,12 +325,12 @@ async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
     assert_eq!(unsigned_body["code"], "FRESH_SIGNATURE_REQUIRED");
 
     let (signing_key_id, signing_key) = seed_signing_key(&pool, identity_id).await;
-    let signature = sign_action(
+    let signature = common::sign_action(
         &signing_key,
         "passkey.revoke_last",
         &[&second_passkey_id, &identity_id.to_string()],
     );
-    let confirmed_status = auth(
+    let confirmed_status = common::auth(
         http.post(format!("{base}/me/passkeys/{second_passkey_id}/revoke")),
         &token_via_b,
     )

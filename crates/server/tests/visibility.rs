@@ -60,12 +60,8 @@ async fn seed_friendship(
         .expect("failed to seed friendship");
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
 async fn set_presence_visibility(http: &reqwest::Client, base: &str, token: &str, value: &str) {
-    let response = auth(http.patch(format!("{base}/me")), token)
+    let response = common::auth(http.patch(format!("{base}/me")), token)
         .json(&serde_json::json!({ "presence_visibility": value }))
         .send()
         .await
@@ -76,7 +72,7 @@ async fn set_presence_visibility(http: &reqwest::Client, base: &str, token: &str
 }
 
 async fn publish_presence(http: &reqwest::Client, base: &str, token: &str) {
-    let response = auth(http.put(format!("{base}/me/presence")), token)
+    let response = common::auth(http.put(format!("{base}/me/presence")), token)
         .json(&serde_json::json!({ "status": "Online" }))
         .send()
         .await
@@ -96,14 +92,15 @@ async fn presence_visible_to(
     viewer_token: &str,
     subject: avalon_protocol::ids::IdentityId,
 ) -> bool {
-    let response: serde_json::Value = auth(http.get(format!("{base}/presence")), viewer_token)
-        .query(&[("ids", subject.to_string())])
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let response: serde_json::Value =
+        common::auth(http.get(format!("{base}/presence")), viewer_token)
+            .query(&[("ids", subject.to_string())])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     response[0]["status"] == "Online"
 }
 
@@ -144,17 +141,18 @@ async fn presence_visibility_matrix() {
 
 async fn create_guild(http: &reqwest::Client, base: &str, owner_token: &str) -> Uuid {
     let suffix = Uuid::new_v4().simple().to_string();
-    let response: serde_json::Value = auth(http.post(format!("{base}/guilds")), owner_token)
-        .json(&serde_json::json!({
-            "name": format!("Visibility Test {}", &suffix[..8]),
-            "tag": suffix[..4].to_uppercase(),
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let response: serde_json::Value =
+        common::auth(http.post(format!("{base}/guilds")), owner_token)
+            .json(&serde_json::json!({
+                "name": format!("Visibility Test {}", &suffix[..8]),
+                "tag": suffix[..4].to_uppercase(),
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     response["id"].as_str().unwrap().parse().unwrap()
 }
 
@@ -181,7 +179,7 @@ async fn set_roster_visibility(
     guild_id: Uuid,
     value: &str,
 ) {
-    let response = auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
+    let response = common::auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
         .json(&serde_json::json!({ "roster_visibility": value }))
         .send()
         .await
@@ -190,7 +188,7 @@ async fn set_roster_visibility(
 }
 
 async fn can_list_members(http: &reqwest::Client, base: &str, token: &str, guild_id: Uuid) -> bool {
-    let response = auth(http.get(format!("{base}/guilds/{guild_id}/members")), token)
+    let response = common::auth(http.get(format!("{base}/guilds/{guild_id}/members")), token)
         .send()
         .await
         .unwrap();
@@ -241,7 +239,7 @@ async fn set_guild_public(
     guild_id: Uuid,
     value: bool,
 ) {
-    let response = auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
+    let response = common::auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
         .json(&serde_json::json!({ "public": value }))
         .send()
         .await
@@ -256,7 +254,7 @@ async fn set_recruiting(
     guild_id: Uuid,
     value: bool,
 ) {
-    let response = auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
+    let response = common::auth(http.patch(format!("{base}/guilds/{guild_id}")), owner_token)
         .json(&serde_json::json!({ "recruiting": value }))
         .send()
         .await

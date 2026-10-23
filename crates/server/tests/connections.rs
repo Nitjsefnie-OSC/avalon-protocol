@@ -6,7 +6,7 @@
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -33,16 +33,6 @@ async fn seed_signing_key(
     (key_id, signing_key)
 }
 
-/// Mirrors `crate::signature_gate::canonical_message` byte-for-byte.
-fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> String {
-    let mut message = format!("avalon:{action_tag}:v1");
-    for field in fields {
-        message.push(':');
-        message.push_str(field);
-    }
-    BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
-}
-
 /// Signs a `POST /integrations/{slug}/connect` request for `identity_id`
 /// requesting exactly `capabilities`, seeding a fresh signing key each
 /// call — every `connect` in this file needs one now.
@@ -53,7 +43,7 @@ async fn connect_body(
     capabilities: &[&str],
 ) -> serde_json::Value {
     let (signing_key_id, signing_key) = seed_signing_key(pool, identity_id).await;
-    let signature = sign_action(
+    let signature = common::sign_action(
         &signing_key,
         "integration.connect",
         &[slug, &capabilities.join(",")],

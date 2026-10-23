@@ -43,10 +43,6 @@ async fn seed_identity_session(
     (identity_id, token)
 }
 
-fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
 #[tokio::test]
 #[ignore]
 async fn resolves_display_names_for_a_batch_of_ids() {
@@ -61,7 +57,7 @@ async fn resolves_display_names_for_a_batch_of_ids() {
     let (alice_id, alice_token) = seed_identity_session(&pool, &alice_name).await;
     let (bob_id, _bob_token) = seed_identity_session(&pool, &bob_name).await;
 
-    let response: serde_json::Value = auth(
+    let response: serde_json::Value = common::auth(
         http.get(format!(
             "{base}/identities/profiles?ids={alice_id},{bob_id}"
         )),
@@ -94,7 +90,7 @@ async fn unknown_ids_are_omitted_not_errors() {
     let (alice_id, alice_token) = seed_identity_session(&pool, &alice_name).await;
     let missing_id = avalon_protocol::ids::IdentityId::random_for_tests();
 
-    let response = auth(
+    let response = common::auth(
         http.get(format!(
             "{base}/identities/profiles?ids={alice_id},{missing_id}"
         )),
