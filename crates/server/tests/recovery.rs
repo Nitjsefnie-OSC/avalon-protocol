@@ -1160,14 +1160,14 @@ async fn replay_recovery_passkeys(
     // Empty temporary projections keep the author's local writes from masking missing events.
     sqlx::query(
         "CREATE TEMP TABLE indexer_identity_passkeys \
-         (LIKE public.indexer_identity_passkeys INCLUDING ALL) ON COMMIT DROP",
+         (LIKE indexer_identity_passkeys INCLUDING ALL) ON COMMIT DROP",
     )
     .execute(&mut *tx)
     .await
     .unwrap();
     sqlx::query(
         "CREATE TEMP TABLE indexer_identity_passkey_revocations \
-         (LIKE public.indexer_identity_passkey_revocations INCLUDING ALL) ON COMMIT DROP",
+         (LIKE indexer_identity_passkey_revocations INCLUDING ALL) ON COMMIT DROP",
     )
     .execute(&mut *tx)
     .await
