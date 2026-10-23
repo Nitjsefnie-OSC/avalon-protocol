@@ -1223,6 +1223,10 @@ async fn finalize_registers_the_replacement_passkey_for_mirror_replay() {
         "replacement registration must be emitted"
     );
     let registration = registrations[0];
+    assert_eq!(
+        registration.timestamp,
+        replacement.get::<OffsetDateTime, _>("added_at")
+    );
     let payload: IdentityPasskeyRegisteredPayload =
         serde_json::from_value(registration.payload.clone()).unwrap();
     assert_eq!(payload.passkey_id, replacement.get::<Uuid, _>("id"));
@@ -1324,6 +1328,10 @@ async fn finalize_registers_the_replacement_passkey_for_mirror_replay() {
         payload.passkey_data
     );
     assert_eq!(active.get::<Option<String>, _>("label"), payload.label);
+    assert_eq!(
+        active.get::<OffsetDateTime, _>("added_at"),
+        replacement.get::<OffsetDateTime, _>("added_at")
+    );
     assert!(mirrored
         .iter()
         .all(|row| !old_passkeys.contains(&row.get::<Uuid, _>("passkey_id"))));
