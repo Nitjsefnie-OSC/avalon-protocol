@@ -1,0 +1,99 @@
+name: Avalon fork witness-test probe (osc adv 1174)
+
+# Fork-only, dispatch-only workflow file backing avalon-protocol#1174: runs the
+# ignored witness live-test files (server re-attestation + chain checkpoints)
+# against a private server + Postgres, the same way scripts/live-tests.sh's
+# core group runs them locally. This file is intentionally not sent upstream.
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Git branch, tag, or 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avalon-osc-adv-1174-witness-${{ inputs.target_ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  witness-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: avalon
+          POSTGRES_PASSWORD: avalon
+          POSTGRES_DB: avalon
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U avalon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout candidate ref
+        uses: actions/checkout@v7
+        with:
+          repository: Nitjsefnie-OSC/avalon-protocol
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Report checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev jq xxd
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      - name: Write env file
+        run: |
+          cat > .env <<'ENV'
+          DATABASE_URL=postgres://avalon:avalon@127.0.0.1:5432/avalon
+          AVALON_SERVER_ADDR=127.0.0.1:8080
+          AVALON_NETWORK_ID=avalon-dev-local
+          AVALON_WEBAUTHN_RP_ID=localhost
+          AVALON_WEBAUTHN_ORIGIN=http://localhost:8080
+          AVALON_HUB_ORIGIN=http://localhost:5173
+          ENV
+
+      - name: Witness live tests (ignored suite, witness files)
+        env:
+          AVALON_ENV_FILE: ${{ github.workspace }}/.env
+          LIVE_ONLY: witness_reattest witness_checkpoints
+        run: |
+          set +e
+          scripts/live-tests.sh core
+          status=$?
+          set -e
+          for f in /tmp/avalon-live-tests-*/schema-*.log /tmp/avalon-live-tests-*/server-*.log /tmp/avalon-live-tests-*/migrate-*.log /tmp/avalon-live-tests-*/test-*.log; do
+            if [ -f "$f" ]; then
+              echo "=== $f (tail) ==="
+              tail -n 250 "$f"
+            fi
+          done
+          exit "$status"
