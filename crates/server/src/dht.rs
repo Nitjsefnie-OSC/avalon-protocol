@@ -660,7 +660,16 @@ fn dial_for_http(swarm: &mut Swarm<DhtBehaviour>, peers: &PeerTable, peer: PeerI
     match swarm.dial(opts) {
         Ok(()) => HttpDial::Started(id),
         Err(DialError::DialPeerConditionFalse(_)) => HttpDial::Joined,
-        Err(DialError::NoAddresses) => HttpDial::NoAddresses,
+        Err(DialError::NoAddresses)
+            if crate::mirror_watcher::parse_mirror_peers(
+                &crate::mirror_watcher::effective_mirror_peers(),
+                false,
+            )
+            .iter()
+            .any(|(_, url)| crate::node_http::parse_p2p_base(url) == Some(peer)) =>
+        {
+            HttpDial::NoAddresses
+        }
         Err(e) => {
             tracing::debug!(%peer, "avalon-dht: node-http dial not started: {e}");
             HttpDial::Failed
@@ -752,7 +761,7 @@ fn start_http(
         for w in entry.waiting.into_iter().chain([parked_request]) {
             let _ = w
                 .respond_to
-                .send(Err(local_failure("could not dial the peer")));
+                .send(Err(local_failure("no address to dial the peer")));
         }
         return;
     }
@@ -886,7 +895,7 @@ fn retry_parked(swarm: &mut Swarm<DhtBehaviour>, peers: &PeerTable, parked: &mut
         for w in entry.waiting.drain(..) {
             let _ = w
                 .respond_to
-                .send(Err(local_failure("could not dial the peer")));
+                .send(Err(local_failure("no address to dial the peer")));
         }
         false
     });
@@ -1873,10 +1882,84 @@ mod tests {
         tx
     }
 
+    struct ConfiguredMirrorSource {
+        previous: Option<std::ffi::OsString>,
+        _env: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ConfiguredMirrorSource {
+        fn new(peer: PeerId) -> Self {
+            let env = crate::test_env::guard();
+            let previous = std::env::var_os("AVALON_MIRROR_PEERS");
+            unsafe {
+                std::env::set_var("AVALON_MIRROR_PEERS", format!("node:source=p2p://{peer}"));
+            }
+            Self {
+                previous,
+                _env: env,
+            }
+        }
+    }
+
+    impl Drop for ConfiguredMirrorSource {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("AVALON_MIRROR_PEERS", value),
+                    None => std::env::remove_var("AVALON_MIRROR_PEERS"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_addressless_peer_fails_locally_without_waiting() {
+        let _configured = ConfiguredMirrorSource::new(sample_peer_id());
+        let mut swarm = test_swarm();
+        let peer = sample_peer_id();
+        let (request, mut rx) = parked_request();
+        let mut parked = ParkedRequests::new();
+        start_http(
+            &mut swarm,
+            &PeerTable::new(),
+            &mut HashMap::new(),
+            &mut parked,
+            peer,
+            request,
+        );
+        let result = rx.try_recv();
+        assert!(
+            matches!(&result, Ok(Err(NodeHttpError::Stream { kind: StreamErrorKind::Local, message })) if message == "no address to dial the peer"),
+            "an unconfigured peer must fail locally without waiting: {result:?}"
+        );
+        assert!(parked.is_empty());
+        assert_eq!(swarm.behaviour().kad.iter_queries().count(), 0);
+
+        unsafe {
+            std::env::set_var("AVALON_MIRROR_PEERS", format!("node:source=p2p://{peer}"));
+        }
+        let (request, mut rx) = parked_request();
+        start_http(
+            &mut swarm,
+            &PeerTable::new(),
+            &mut HashMap::new(),
+            &mut parked,
+            peer,
+            request,
+        );
+        assert!(parked.contains_key(&peer));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(swarm.behaviour().kad.iter_queries().count(), 1);
+    }
+
     #[tokio::test]
     async fn the_first_http_request_resolves_a_peer_known_only_to_bootstrap() {
         let (target, target_address) = listening_swarm().await;
         let target_peer = *target.local_peer_id();
+        let _configured = ConfiguredMirrorSource::new(target_peer);
         let (mut bootstrap, bootstrap_address) = listening_swarm().await;
         bootstrap
             .behaviour_mut()
@@ -1922,6 +2005,7 @@ mod tests {
     async fn an_addressless_http_peer_is_looked_up_before_failing() {
         let mut swarm = test_swarm();
         let peer = sample_peer_id();
+        let _configured = ConfiguredMirrorSource::new(peer);
         let (request, mut rx) = parked_request();
         let mut parked = ParkedRequests::new();
         start_http(
@@ -1947,6 +2031,7 @@ mod tests {
     async fn an_addressless_http_peer_keeps_its_original_deadline() {
         let mut swarm = test_swarm();
         let peer = sample_peer_id();
+        let _configured = ConfiguredMirrorSource::new(peer);
         let (request, mut rx) = parked_request();
         let deadline = request.deadline;
         let mut parked = ParkedRequests::new();
@@ -1979,6 +2064,7 @@ mod tests {
     async fn lookup_retries_share_the_queue_and_send_after_an_address_arrives() {
         let mut swarm = test_swarm();
         let peer = sample_peer_id();
+        let _configured = ConfiguredMirrorSource::new(peer);
         let peers = PeerTable::new();
         let mut pending = HashMap::new();
         let mut parked = ParkedRequests::new();
@@ -2046,6 +2132,7 @@ mod tests {
     async fn abandoning_an_addressless_request_finishes_its_lookup() {
         let mut swarm = test_swarm();
         let peer = sample_peer_id();
+        let _configured = ConfiguredMirrorSource::new(peer);
         let peers = PeerTable::new();
         let mut parked = ParkedRequests::new();
         let (request, rx) = parked_request();
@@ -2068,6 +2155,7 @@ mod tests {
     async fn a_connection_after_the_lookup_deadline_does_not_send_the_request() {
         let mut swarm = test_swarm();
         let peer = sample_peer_id();
+        let _configured = ConfiguredMirrorSource::new(peer);
         let mut parked = ParkedRequests::new();
         let (mut request, mut rx) = parked_request();
         request.deadline = Instant::now() - Duration::from_secs(1);
@@ -2095,12 +2183,14 @@ mod tests {
 
     #[tokio::test]
     async fn an_unresolved_http_request_does_not_hold_the_worker_open() {
+        let peer = sample_peer_id();
+        let _configured = ConfiguredMirrorSource::new(peer);
         let mut workers = tokio::task::JoinSet::new();
         let commands = spawn_test_worker(test_swarm(), &mut workers);
         let (request, mut rx) = parked_request();
         commands
             .send(DhtCommand::HttpRequest {
-                peer: sample_peer_id(),
+                peer,
                 request: request.request,
                 respond_to: request.respond_to,
             })
