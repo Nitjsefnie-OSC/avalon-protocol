@@ -1,5 +1,7 @@
 //! A witness's cosignature over its unchanged head is refreshed in place by the re-attestation
 //! pass, never replaced by a conflicting one. Real Postgres. Gated `--ignored`.
+//! A witness key change at an unchanged head rotates the stored cosignature and the
+//! checkpoint's key id.
 
 use avalon_chain::mirror;
 use avalon_chain::PostgresSettlementProvider;
