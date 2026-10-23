@@ -5,22 +5,11 @@
 //! `crates/server/tests/blocks.rs` / `crates/server/tests/guild_channels.rs`
 //! already use for identities/sessions.
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
+mod common;
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -88,15 +77,17 @@ async fn create_guild(client: &reqwest::Client, owner_token: &str) -> Uuid {
         "tag": suffix[..5].to_uppercase(),
         "description": "a guild created by a conversations integration test",
     });
-    let created: serde_json::Value =
-        auth(client.post(format!("{}/guilds", server_url())), owner_token)
-            .json(&body)
-            .send()
-            .await
-            .expect("create guild request failed")
-            .json()
-            .await
-            .expect("expected JSON guild body");
+    let created: serde_json::Value = auth(
+        client.post(format!("{}/guilds", common::server_url())),
+        owner_token,
+    )
+    .json(&body)
+    .send()
+    .await
+    .expect("create guild request failed")
+    .json()
+    .await
+    .expect("expected JSON guild body");
     Uuid::parse_str(created["id"].as_str().expect("expected guild id")).expect("guild id is a UUID")
 }
 
@@ -123,14 +114,14 @@ async fn seed_guild_membership(
 #[tokio::test]
 #[ignore]
 async fn two_identities_create_a_conversation_and_exchange_messages_across_sessions() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
     seed_friendship(&pool, alice_id, bob_id).await;
 
     let created: serde_json::Value = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [bob_id] }))
@@ -146,7 +137,7 @@ async fn two_identities_create_a_conversation_and_exchange_messages_across_sessi
     let sent = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &alice_token,
     )
@@ -159,7 +150,7 @@ async fn two_identities_create_a_conversation_and_exchange_messages_across_sessi
     let reply = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &bob_token,
     )
@@ -173,7 +164,7 @@ async fn two_identities_create_a_conversation_and_exchange_messages_across_sessi
     let messages: Vec<serde_json::Value> = auth(
         client.get(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &bob_token,
     )
@@ -190,7 +181,7 @@ async fn two_identities_create_a_conversation_and_exchange_messages_across_sessi
     // Re-requesting a conversation for the same participant set returns
     // the same conversation id rather than creating a duplicate.
     let recreated: serde_json::Value = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &bob_token,
     )
     .json(&serde_json::json!({ "participants": [alice_id] }))
@@ -208,14 +199,14 @@ async fn two_identities_create_a_conversation_and_exchange_messages_across_sessi
 #[tokio::test]
 #[ignore]
 async fn a_block_created_mid_conversation_rejects_the_next_send() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
     seed_friendship(&pool, alice_id, bob_id).await;
 
     let created: serde_json::Value = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [bob_id] }))
@@ -231,7 +222,7 @@ async fn a_block_created_mid_conversation_rejects_the_next_send() {
     let first_send = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &alice_token,
     )
@@ -242,11 +233,14 @@ async fn a_block_created_mid_conversation_rejects_the_next_send() {
     assert!(first_send.status().is_success());
 
     // Bob blocks Alice mid-conversation.
-    let block = auth(client.post(format!("{}/blocks", server_url())), &bob_token)
-        .json(&serde_json::json!({ "identity_id": alice_id }))
-        .send()
-        .await
-        .expect("block request failed");
+    let block = auth(
+        client.post(format!("{}/blocks", common::server_url())),
+        &bob_token,
+    )
+    .json(&serde_json::json!({ "identity_id": alice_id }))
+    .send()
+    .await
+    .expect("block request failed");
     assert!(block.status().is_success());
 
     // Alice's next send is now rejected — with the same status/shape a
@@ -254,7 +248,7 @@ async fn a_block_created_mid_conversation_rejects_the_next_send() {
     let rejected = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &alice_token,
     )
@@ -275,7 +269,7 @@ async fn a_block_created_mid_conversation_rejects_the_next_send() {
     let read_rejected = auth(
         client.get(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &alice_token,
     )
@@ -292,7 +286,7 @@ async fn a_block_created_mid_conversation_rejects_the_next_send() {
     // The conversation also drops out of Alice's own list — consistent
     // with her no longer being able to read or post to it.
     let listed: Vec<serde_json::Value> = auth(
-        client.get(format!("{}/conversations", server_url())),
+        client.get(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .send()
@@ -312,7 +306,7 @@ async fn a_block_created_mid_conversation_rejects_the_next_send() {
 #[tokio::test]
 #[ignore]
 async fn a_non_participant_cannot_read_or_post() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, _bob_token) = seed_identity_session(&pool).await;
@@ -320,7 +314,7 @@ async fn a_non_participant_cannot_read_or_post() {
     seed_friendship(&pool, alice_id, bob_id).await;
 
     let created: serde_json::Value = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [bob_id] }))
@@ -335,7 +329,7 @@ async fn a_non_participant_cannot_read_or_post() {
     let read_attempt = auth(
         client.get(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &eve_token,
     )
@@ -347,7 +341,7 @@ async fn a_non_participant_cannot_read_or_post() {
     let post_attempt = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &eve_token,
     )
@@ -371,14 +365,14 @@ async fn a_non_participant_cannot_read_or_post() {
 #[tokio::test]
 #[ignore]
 async fn retrying_a_send_with_the_same_client_entry_id_does_not_double_apply() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, _bob_token) = seed_identity_session(&pool).await;
     seed_friendship(&pool, alice_id, bob_id).await;
 
     let created: serde_json::Value = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [bob_id] }))
@@ -398,7 +392,7 @@ async fn retrying_a_send_with_the_same_client_entry_id_does_not_double_apply() {
     let first: serde_json::Value = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &alice_token,
     )
@@ -418,7 +412,7 @@ async fn retrying_a_send_with_the_same_client_entry_id_does_not_double_apply() {
     let retried: serde_json::Value = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &alice_token,
     )
@@ -442,7 +436,7 @@ async fn retrying_a_send_with_the_same_client_entry_id_does_not_double_apply() {
     let distinct: serde_json::Value = auth(
         client.post(format!(
             "{}/conversations/{conversation_id}/messages",
-            server_url()
+            common::server_url()
         )),
         &alice_token,
     )
@@ -489,13 +483,13 @@ async fn retrying_a_send_with_the_same_client_entry_id_does_not_double_apply() {
 #[tokio::test]
 #[ignore]
 async fn unrelated_participant_cannot_create_a_conversation() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, _bob_token) = seed_identity_session(&pool).await;
 
     let response = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [bob_id] }))
@@ -510,14 +504,14 @@ async fn unrelated_participant_cannot_create_a_conversation() {
 #[tokio::test]
 #[ignore]
 async fn discoverable_but_unrelated_participant_is_still_rejected() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, _bob_token) = seed_identity_session(&pool).await;
     seed_discoverable(&pool, bob_id).await;
 
     let response = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [bob_id] }))
@@ -532,7 +526,7 @@ async fn discoverable_but_unrelated_participant_is_still_rejected() {
 #[tokio::test]
 #[ignore]
 async fn shared_guild_membership_permits_conversation_creation() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, _bob_token) = seed_identity_session(&pool).await;
@@ -541,7 +535,7 @@ async fn shared_guild_membership_permits_conversation_creation() {
     seed_guild_membership(&pool, guild_id, bob_id).await;
 
     let created: serde_json::Value = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [bob_id] }))
@@ -559,14 +553,14 @@ async fn shared_guild_membership_permits_conversation_creation() {
 #[tokio::test]
 #[ignore]
 async fn nonexistent_and_unrelated_participant_get_identical_rejection() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let client = reqwest::Client::new();
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (unrelated_id, _unrelated_token) = seed_identity_session(&pool).await;
     let nonexistent_id = avalon_protocol::ids::IdentityId::random_for_tests();
 
     let unrelated_response = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [unrelated_id] }))
@@ -580,7 +574,7 @@ async fn nonexistent_and_unrelated_participant_get_identical_rejection() {
         .expect("expected JSON error body");
 
     let nonexistent_response = auth(
-        client.post(format!("{}/conversations", server_url())),
+        client.post(format!("{}/conversations", common::server_url())),
         &alice_token,
     )
     .json(&serde_json::json!({ "participants": [nonexistent_id] }))

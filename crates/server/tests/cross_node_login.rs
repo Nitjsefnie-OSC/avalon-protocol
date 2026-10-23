@@ -20,9 +20,7 @@ use uuid::Uuid;
 
 use avalon_protocol::cross_node_login::{signing_bytes, CrossNodeLoginGrant, DEFAULT_TTL_SECONDS};
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
+mod common;
 
 fn rp_origin() -> url::Url {
     let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
@@ -198,7 +196,7 @@ fn mint_grant(
 #[ignore]
 async fn same_device_submit_returns_a_real_session_directly() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -264,7 +262,7 @@ async fn same_device_submit_returns_a_real_session_directly() {
 #[ignore]
 async fn cross_device_start_submit_poll_round_trip_delivers_a_session_exactly_once() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -364,7 +362,7 @@ async fn cross_device_start_submit_poll_round_trip_delivers_a_session_exactly_on
 #[ignore]
 async fn a_grant_bound_to_a_different_destination_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -395,7 +393,7 @@ async fn a_grant_bound_to_a_different_destination_is_rejected() {
 #[ignore]
 async fn a_grant_cannot_be_replayed() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -443,7 +441,7 @@ async fn a_grant_cannot_be_replayed() {
 #[ignore]
 async fn an_expired_grant_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -484,7 +482,7 @@ async fn an_expired_grant_is_rejected() {
 #[ignore]
 async fn a_grant_claiming_too_long_a_ttl_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -525,7 +523,7 @@ async fn a_grant_claiming_too_long_a_ttl_is_rejected() {
 #[ignore]
 async fn a_grant_signed_by_the_wrong_key_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, _real_signing_key) =
         create_identity_and_log_in(&http, &base).await;
@@ -569,7 +567,7 @@ async fn a_grant_signed_by_the_wrong_key_is_rejected() {
 #[ignore]
 async fn a_denied_request_can_never_be_approved_afterward() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -628,7 +626,7 @@ async fn a_denied_request_can_never_be_approved_afterward() {
 #[ignore]
 async fn polling_an_unknown_request_code_is_unauthorized() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let response = http
         .post(format!("{base}/auth/cross-node/poll"))
@@ -647,7 +645,7 @@ async fn polling_an_unknown_request_code_is_unauthorized() {
 #[ignore]
 async fn lookup_by_user_code_returns_pending_status_and_context() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let start: serde_json::Value = http
         .post(format!("{base}/auth/cross-node/start"))
@@ -685,7 +683,7 @@ async fn lookup_by_user_code_returns_pending_status_and_context() {
 #[ignore]
 async fn lookup_reflects_denied_status() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let start: serde_json::Value = http
         .post(format!("{base}/auth/cross-node/start"))
@@ -721,7 +719,7 @@ async fn lookup_reflects_denied_status() {
 #[ignore]
 async fn lookup_of_an_unknown_user_code_is_not_found() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let response = http
         .get(format!("{base}/auth/cross-node/lookup"))
@@ -751,7 +749,7 @@ async fn session_origin_signing_key(token: &str) -> Option<uuid::Uuid> {
 #[ignore]
 async fn a_same_device_submit_waits_for_an_in_flight_revocation_of_its_key() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
     let start: serde_json::Value = http

@@ -12,24 +12,12 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 mod attestation_support;
+mod common;
 use attestation_support::{bulk_bytes, issue_bytes, now_micros};
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -376,8 +364,8 @@ fn evidence_of_size(total_bytes: usize) -> serde_json::Value {
 #[ignore]
 async fn bulk_issue_with_all_valid_claims_issues_every_one() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
     define_achievement(&http, &base, &call.integrator, "dragon_slayer").await;
     define_achievement(&http, &base, &call.integrator, "lost_city").await;
@@ -398,8 +386,8 @@ async fn bulk_issue_with_all_valid_claims_issues_every_one() {
 #[ignore]
 async fn bulk_issue_reports_per_claim_failures_without_failing_the_whole_batch() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
     define_achievement(&http, &base, &call.integrator, "dragon_slayer").await;
     define_achievement(&http, &base, &call.integrator, "retired_one").await;
@@ -437,8 +425,8 @@ async fn bulk_issue_reports_per_claim_failures_without_failing_the_whole_batch()
 #[ignore]
 async fn bulk_issue_rejects_a_signature_from_a_different_key() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
     define_achievement(&http, &base, &call.integrator, "dragon_slayer").await;
 
@@ -493,8 +481,8 @@ async fn bulk_issue_rejects_a_signature_from_a_different_key() {
 #[ignore]
 async fn bulk_issue_rejects_a_claim_list_tampered_after_signing() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
     define_achievement(&http, &base, &call.integrator, "dragon_slayer").await;
     define_achievement(&http, &base, &call.integrator, "lost_city").await;
@@ -551,8 +539,8 @@ async fn bulk_issue_rejects_a_claim_list_tampered_after_signing() {
 #[ignore]
 async fn bulk_issue_rejects_an_empty_claims_list() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
 
     let response = bulk_issue(&http, &base, &call, &[]).await;
@@ -563,8 +551,8 @@ async fn bulk_issue_rejects_an_empty_claims_list() {
 #[ignore]
 async fn bulk_issue_rejects_the_whole_batch_on_one_oversized_evidence() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
     define_achievement(&http, &base, &call.integrator, "dragon_slayer").await;
     define_achievement(&http, &base, &call.integrator, "lost_city").await;
@@ -601,8 +589,8 @@ async fn bulk_issue_rejects_the_whole_batch_on_one_oversized_evidence() {
 #[ignore]
 async fn bulk_issue_accepts_evidence_at_the_byte_cap() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
     define_achievement(&http, &base, &call.integrator, "dragon_slayer").await;
 
@@ -624,8 +612,8 @@ async fn single_claim_issuance_is_unaffected_by_the_bulk_endpoint() {
     // Regression coverage for #495's own invariant: bulk issuance must not
     // have altered the pre-existing single-issuance path at all.
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let call = setup(&http, &base, &pool).await;
     define_achievement(&http, &base, &call.integrator, "dragon_slayer").await;
 

@@ -8,22 +8,11 @@
 //! that it's a valid bearer token, so seeding `identities`/`sessions` rows
 //! directly keeps this test focused on what it's actually verifying.
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
+mod common;
 
 /// Seeds a bare identity + session, bypassing WebAuthn entirely, and
 /// returns the session's bearer token.
@@ -63,9 +52,9 @@ fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilde
 #[tokio::test]
 #[ignore]
 async fn request_then_accept_creates_exactly_one_friendship() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
 
@@ -110,9 +99,9 @@ async fn request_then_accept_creates_exactly_one_friendship() {
 #[tokio::test]
 #[ignore]
 async fn adding_a_friend_by_handle_resolves_to_the_same_identity_as_a_direct_request() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (bob_id, alice_token) = {
         let (_alice_id, alice_token) = seed_identity_session(&pool).await;
         let (bob_id, _bob_token) = seed_identity_session(&pool).await;
@@ -156,9 +145,9 @@ async fn adding_a_friend_by_handle_resolves_to_the_same_identity_as_a_direct_req
 #[tokio::test]
 #[ignore]
 async fn resolving_an_unknown_handle_returns_not_found() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (_id, token) = seed_identity_session(&pool).await;
 
     let resolved = auth(
@@ -174,9 +163,9 @@ async fn resolving_an_unknown_handle_returns_not_found() {
 #[tokio::test]
 #[ignore]
 async fn declining_a_request_leaves_no_friendship() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
 
@@ -210,9 +199,9 @@ async fn declining_a_request_leaves_no_friendship() {
 #[tokio::test]
 #[ignore]
 async fn removing_a_friendship_is_visible_to_both_parties() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
 

@@ -13,24 +13,12 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 mod attestation_support;
+mod common;
 use attestation_support::{bulk_bytes, issue_bytes, now_micros};
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
 
 fn configured_quota() -> Option<usize> {
     std::env::var("AVALON_ACHIEVEMENT_WRITE_QUOTA")
@@ -319,8 +307,8 @@ async fn writes_past_the_quota_are_rejected_but_a_different_subject_is_unaffecte
     };
 
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let integrator = register_integrator(&http, &base).await;
     define_achievement(&http, &base, &integrator, "grind").await;
@@ -374,8 +362,8 @@ async fn a_bulk_call_that_would_cross_the_quota_is_rejected_as_a_whole() {
     };
 
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let integrator = register_integrator(&http, &base).await;
     define_achievement(&http, &base, &integrator, "grind").await;

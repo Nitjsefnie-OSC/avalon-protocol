@@ -34,10 +34,11 @@ use passkey_authenticator::{Authenticator, MemoryStore, MockUserValidationMethod
 use passkey_client::{Client, DefaultClientData, Origin};
 use passkey_types::ctap2::Aaguid;
 use passkey_types::webauthn::CredentialCreationOptions;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+mod common;
 
 /// #697/#698: seeds a real signing key for `identity_id` so a test can
 /// produce a genuine fresh-signature over HTTP, same pattern
@@ -70,22 +71,10 @@ fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> S
     BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
 }
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
 fn rp_origin() -> url::Url {
     let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
         .unwrap_or_else(|_| "http://localhost:8080".to_string());
     url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 type VirtualClient = Client<
@@ -262,9 +251,9 @@ async fn configure_guardians(
 #[tokio::test]
 #[ignore]
 async fn three_guardian_two_of_three_threshold_recovers_after_backdated_delay() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, g1_token) = seed_identity_session(&pool).await;
@@ -454,9 +443,9 @@ async fn three_guardian_two_of_three_threshold_recovers_after_backdated_delay() 
 #[tokio::test]
 #[ignore]
 async fn a_guardian_below_threshold_cannot_unilaterally_recover() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, g1_token) = seed_identity_session(&pool).await;
@@ -522,9 +511,9 @@ async fn a_guardian_below_threshold_cannot_unilaterally_recover() {
 #[tokio::test]
 #[ignore]
 async fn the_owner_vetoes_and_the_attempt_is_cancelled() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, g1_token) = seed_identity_session(&pool).await;
@@ -622,9 +611,9 @@ async fn the_owner_vetoes_and_the_attempt_is_cancelled() {
 #[tokio::test]
 #[ignore]
 async fn a_guardian_removed_from_the_set_can_no_longer_approve_or_cancel() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, g1_token) = seed_identity_session(&pool).await;
@@ -674,7 +663,7 @@ async fn a_guardian_removed_from_the_set_can_no_longer_approve_or_cancel() {
 #[ignore]
 async fn changing_the_guardian_set_requires_a_valid_session() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let unauthenticated = http
         .put(format!("{base}/me/recovery/guardians"))
@@ -692,9 +681,9 @@ async fn changing_the_guardian_set_requires_a_valid_session() {
 #[tokio::test]
 #[ignore]
 async fn removing_a_guardian_requires_a_fresh_signature() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, _g1_token) = seed_identity_session(&pool).await;
@@ -763,9 +752,9 @@ async fn removing_a_guardian_requires_a_fresh_signature() {
 #[tokio::test]
 #[ignore]
 async fn guardians_must_be_current_friends_not_arbitrary_identities() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (stranger_id, _stranger_token) = seed_identity_session(&pool).await;
@@ -790,9 +779,9 @@ async fn guardians_must_be_current_friends_not_arbitrary_identities() {
 #[tokio::test]
 #[ignore]
 async fn start_gives_no_distinguishable_signal_between_nonexistent_and_unconfigured_identity() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (configured_owner, configured_token) = seed_identity_session(&pool).await;
     let (guardian_id, _guardian_token) = seed_identity_session(&pool).await;
@@ -859,9 +848,9 @@ async fn start_gives_no_distinguishable_signal_between_nonexistent_and_unconfigu
 #[tokio::test]
 #[ignore]
 async fn a_racing_approval_never_resurrects_a_cancelled_request() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, g1_token) = seed_identity_session(&pool).await;
@@ -948,9 +937,9 @@ async fn a_racing_approval_never_resurrects_a_cancelled_request() {
 #[tokio::test]
 #[ignore]
 async fn guardian_of_lists_only_identities_naming_the_caller() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guardian_id, guardian_token) = seed_identity_session(&pool).await;
@@ -1003,9 +992,9 @@ async fn guardian_of_lists_only_identities_naming_the_caller() {
 #[tokio::test]
 #[ignore]
 async fn a_guardian_can_resign_without_the_owners_cooperation() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (g1_id, g1_token) = seed_identity_session(&pool).await;
@@ -1192,9 +1181,9 @@ async fn replay_recovery_passkeys(
 #[tokio::test]
 #[ignore]
 async fn finalize_registers_the_replacement_passkey_for_mirror_replay() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (owner_id, _token, request_id, old_passkeys) =
         recovery_ready_to_finalize(&pool, &http, &base).await;
 
@@ -1340,9 +1329,9 @@ async fn finalize_registers_the_replacement_passkey_for_mirror_replay() {
 #[tokio::test]
 #[ignore]
 async fn a_finalize_with_a_replacement_projection_conflict_rolls_back_registration() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (owner_id, owner_token, request_id, old_passkeys) =
         recovery_ready_to_finalize(&pool, &http, &base).await;
     let before = emitted_recovery_events(&pool, owner_id).await;
@@ -1437,9 +1426,9 @@ async fn a_finalize_with_a_replacement_projection_conflict_rolls_back_registrati
 #[tokio::test]
 #[ignore]
 async fn finalize_emits_a_passkey_revoked_event_for_each_deleted_passkey() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (owner_id, _token, request_id, old_passkeys) =
         recovery_ready_to_finalize(&pool, &http, &base).await;
 
@@ -1474,9 +1463,9 @@ async fn finalize_emits_a_passkey_revoked_event_for_each_deleted_passkey() {
 #[tokio::test]
 #[ignore]
 async fn a_finalize_that_fails_after_the_passkey_delete_changes_nothing() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (owner_id, owner_token, request_id, old_passkeys) =
         recovery_ready_to_finalize(&pool, &http, &base).await;
 

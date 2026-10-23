@@ -6,22 +6,11 @@
 //! `crates/server/tests/friends.rs` — this feature doesn't care how a
 //! session was established, only that it's a valid bearer token.
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
+mod common;
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -76,9 +65,9 @@ async fn seed_friendship(
 #[tokio::test]
 #[ignore]
 async fn a_friend_request_from_a_blocked_identity_fails_identically_to_a_nonexistent_identity() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
@@ -125,9 +114,9 @@ async fn a_friend_request_from_a_blocked_identity_fails_identically_to_a_nonexis
 #[tokio::test]
 #[ignore]
 async fn blocking_auto_resolves_a_pending_friend_request_in_either_direction() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (_bob_id, bob_token) = seed_identity_session(&pool).await;
@@ -162,9 +151,9 @@ async fn blocking_auto_resolves_a_pending_friend_request_in_either_direction() {
 #[tokio::test]
 #[ignore]
 async fn a_block_hides_presence_in_both_directions() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
@@ -248,9 +237,9 @@ async fn a_block_hides_presence_in_both_directions() {
 #[tokio::test]
 #[ignore]
 async fn a_blocks_list_is_visible_only_to_the_blocker() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
@@ -287,9 +276,9 @@ async fn a_blocks_list_is_visible_only_to_the_blocker() {
 #[tokio::test]
 #[ignore]
 async fn cannot_block_yourself() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
 

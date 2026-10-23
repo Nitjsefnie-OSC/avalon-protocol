@@ -16,21 +16,10 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::SigningKey;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
+mod common;
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -125,7 +114,7 @@ async fn register_unique_integrator(http: &reqwest::Client, base: &str) -> (Stri
 #[ignore]
 async fn a_integrator_with_no_activity_returns_zeros_for_every_labeled_metric() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (slug, _) = register_unique_integrator(&http, &base).await;
 
     let response = http
@@ -171,8 +160,8 @@ async fn a_integrator_with_no_activity_returns_zeros_for_every_labeled_metric() 
 #[ignore]
 async fn a_integrator_with_activity_below_the_floor_reports_coarsened_not_exact_counts() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (signing_key_id, signing_key) = seed_signing_key(&pool, identity_id).await;
     let (slug, _) = register_unique_integrator(&http, &base).await;
@@ -266,8 +255,8 @@ async fn a_integrator_with_activity_below_the_floor_reports_coarsened_not_exact_
 #[ignore]
 async fn a_integrator_with_activity_at_the_floor_reports_exact_counts() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (slug, _) = register_unique_integrator(&http, &base).await;
 
     let connect_capabilities: [&str; 0] = [];
@@ -311,7 +300,7 @@ async fn a_integrator_with_activity_at_the_floor_reports_exact_counts() {
 #[ignore]
 async fn external_registry_route_matches_the_integrator_scoped_one_field_for_field() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (slug, _) = register_unique_integrator(&http, &base).await;
 
     let via_integrations: serde_json::Value = http
@@ -347,7 +336,7 @@ async fn external_registry_route_matches_the_integrator_scoped_one_field_for_fie
 #[ignore]
 async fn every_metric_field_carries_a_definition_and_a_class_label() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (slug, _) = register_unique_integrator(&http, &base).await;
 
     let body: serde_json::Value = http
@@ -397,7 +386,7 @@ async fn every_metric_field_carries_a_definition_and_a_class_label() {
 #[ignore]
 async fn no_field_in_the_response_carries_per_identity_data() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (slug, _) = register_unique_integrator(&http, &base).await;
 
     let body: serde_json::Value = http
@@ -432,7 +421,7 @@ async fn no_field_in_the_response_carries_per_identity_data() {
 #[ignore]
 async fn external_registry_route_404s_for_an_unregistered_slug() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let response = http
         .get(format!("{base}/registry/does-not-exist-{}", Uuid::new_v4()))

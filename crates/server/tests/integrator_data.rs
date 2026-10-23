@@ -10,24 +10,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::header::HeaderMap;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 mod attestation_support;
+mod common;
 use attestation_support::{issue_bytes, now_micros};
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -212,7 +200,7 @@ const CHARACTER_PROTO: &str =
 #[ignore]
 async fn a_malformed_proto_schema_is_rejected_cleanly_and_the_server_stays_up() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let integrator = register_integrator(&http, &base, "test-malformed").await;
 
     let response = publish_schema(
@@ -244,7 +232,7 @@ async fn a_malformed_proto_schema_is_rejected_cleanly_and_the_server_stays_up() 
 #[ignore]
 async fn zero_or_multiple_top_level_messages_are_rejected_cleanly() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let integrator_zero = register_integrator(&http, &base, "test-zero-msg").await;
     let zero = publish_schema(
@@ -275,7 +263,7 @@ async fn zero_or_multiple_top_level_messages_are_rejected_cleanly() {
 #[ignore]
 async fn field_visibility_naming_a_nonexistent_field_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let integrator = register_integrator(&http, &base, "test-bad-field-vis").await;
 
     let response = publish_schema(
@@ -298,7 +286,7 @@ async fn field_visibility_naming_a_nonexistent_field_is_rejected() {
 #[ignore]
 async fn a_pre_384_publish_request_shape_still_works() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let integrator = register_integrator(&http, &base, "test-pre-384").await;
 
     let response = publish_schema(
@@ -320,8 +308,8 @@ async fn a_pre_384_publish_request_shape_still_works() {
 #[ignore]
 async fn a_non_conforming_instance_is_rejected_and_never_stored() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator = register_integrator(&http, &base, "test-bad-instance").await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     connect(&http, &base, &pool, &integrator, identity_id, &token).await;
@@ -387,8 +375,8 @@ async fn a_non_conforming_instance_is_rejected_and_never_stored() {
 #[ignore]
 async fn an_instance_containing_nul_is_rejected_as_invalid_payload() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator = register_integrator(&http, &base, "test-nul-instance").await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     connect(&http, &base, &pool, &integrator, identity_id, &token).await;
@@ -440,8 +428,8 @@ async fn an_oversized_instance_is_rejected_and_never_stored() {
     use avalon_protocol::integrator_schemas::MAX_INSTANCE_SERIALIZED_BYTES;
 
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator = register_integrator(&http, &base, "test-oversized").await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     connect(&http, &base, &pool, &integrator, identity_id, &token).await;
@@ -488,8 +476,8 @@ async fn an_oversized_instance_is_rejected_and_never_stored() {
 #[ignore]
 async fn an_instance_under_the_size_ceiling_is_accepted() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator = register_integrator(&http, &base, "test-under-cap").await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     connect(&http, &base, &pool, &integrator, identity_id, &token).await;
@@ -529,8 +517,8 @@ async fn an_instance_under_the_size_ceiling_is_accepted() {
 #[ignore]
 async fn a_integrator_cannot_publish_instance_data_for_an_unbound_identity() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator = register_integrator(&http, &base, "test-unbound").await;
     let (identity_id, _token) = seed_identity_session(&pool).await; // never connects
 
@@ -570,8 +558,8 @@ async fn a_integrator_cannot_publish_instance_data_for_an_unbound_identity() {
 #[ignore]
 async fn a_integrator_cannot_publish_instance_data_against_another_integrators_schema() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator_a = register_integrator(&http, &base, "test-owner").await;
     let integrator_b = register_integrator(&http, &base, "test-intruder").await;
     let (identity_id, token) = seed_identity_session(&pool).await;
@@ -616,8 +604,8 @@ async fn a_integrator_cannot_publish_instance_data_against_another_integrators_s
 #[ignore]
 async fn a_private_schema_with_one_public_field_exposes_only_that_field() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator = register_integrator(&http, &base, "test-private-vis").await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     connect(&http, &base, &pool, &integrator, identity_id, &token).await;
@@ -680,8 +668,8 @@ async fn a_private_schema_with_one_public_field_exposes_only_that_field() {
 #[ignore]
 async fn a_public_schema_with_one_private_field_hides_only_that_field() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let integrator = register_integrator(&http, &base, "test-public-vis").await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     connect(&http, &base, &pool, &integrator, identity_id, &token).await;
@@ -745,8 +733,8 @@ async fn a_public_schema_with_one_private_field_hides_only_that_field() {
 #[ignore]
 async fn cross_integrator_write_isolation_is_total() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     // Integrator 1: schema + instance + achievement, all real.
     let integrator_1 = register_integrator(&http, &base, "test-iso-owner").await;

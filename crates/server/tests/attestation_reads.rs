@@ -23,11 +23,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod attestation_support;
+mod common;
 use attestation_support::{issue_bytes, now_micros};
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
 
 struct RegisteredIntegrator {
     signing_key: SigningKey,
@@ -161,7 +158,7 @@ fn sign_connect(signing_key: &SigningKey, slug: &str, capabilities: &[&str]) -> 
 #[ignore]
 async fn scenario_d_an_authentic_valid_claim_from_an_untrusted_issuer_is_not_recognized() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect(&database_url)

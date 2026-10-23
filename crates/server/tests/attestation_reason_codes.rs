@@ -14,24 +14,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::header::HeaderMap;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 mod attestation_support;
+mod common;
 use attestation_support::{issue_bytes, now_micros, revoke_bytes};
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -298,8 +286,8 @@ async fn revoke_with_reason(
 #[ignore]
 async fn a_cheating_coded_revocation_still_appears_in_current_state_listing() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (integrator, token, _identity_id, attestation_id) = issue_one(&http, &base, &pool).await;
 
     revoke_with_reason(&http, &base, &integrator, attestation_id, "cheating").await;
@@ -333,8 +321,8 @@ async fn a_cheating_coded_revocation_still_appears_in_current_state_listing() {
 #[ignore]
 async fn a_mistake_coded_revocation_disappears_from_current_state_listing_but_not_raw_history() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (integrator, token, _identity_id, attestation_id) = issue_one(&http, &base, &pool).await;
 
     revoke_with_reason(&http, &base, &integrator, attestation_id, "mistake").await;

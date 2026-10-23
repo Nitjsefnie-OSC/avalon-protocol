@@ -32,9 +32,7 @@ use passkey_client::{Client, DefaultClientData, Origin};
 use passkey_types::ctap2::Aaguid;
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
+mod common;
 
 fn rp_origin() -> url::Url {
     let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
@@ -67,7 +65,7 @@ fn new_virtual_client() -> VirtualClient {
 #[ignore]
 async fn registration_and_login_challenges_do_not_restrict_authenticator_attachment() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let signing_key = SigningKey::generate(&mut rand::rng());
     let identity_id =
         avalon_protocol::identity_id::derive_identity_id_for_key(&signing_key.verifying_key());

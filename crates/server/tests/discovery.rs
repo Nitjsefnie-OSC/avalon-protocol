@@ -5,22 +5,11 @@
 //! identities and sessions are inserted directly rather than through a
 //! real WebAuthn ceremony.
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
+mod common;
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -160,8 +149,8 @@ async fn discover(http: &reqwest::Client, base: &str, token: &str) -> Vec<String
 #[ignore]
 async fn a_friend_of_a_friend_surfaces_as_a_candidate() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
@@ -192,8 +181,8 @@ async fn a_friend_of_a_friend_surfaces_as_a_candidate() {
 #[ignore]
 async fn a_mutual_guild_member_surfaces_as_a_candidate() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
@@ -215,8 +204,8 @@ async fn a_mutual_guild_member_surfaces_as_a_candidate() {
 #[ignore]
 async fn a_blocked_identity_never_surfaces_even_via_mutual_guild() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
@@ -249,7 +238,7 @@ async fn a_blocked_identity_never_surfaces_even_via_mutual_guild() {
 #[ignore]
 async fn discover_requires_a_session_token() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let response = http
         .get(format!("{base}/people/discover"))
@@ -309,8 +298,8 @@ async fn display_name(pool: &PgPool, identity_id: avalon_protocol::ids::Identity
 #[ignore]
 async fn opting_in_then_out_of_search_takes_effect_immediately() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let (target_id, target_token) = seed_identity_session(&pool).await;
     let (_searcher_id, searcher_token) = seed_identity_session(&pool).await;
@@ -349,8 +338,8 @@ async fn opting_in_then_out_of_search_takes_effect_immediately() {
 #[ignore]
 async fn a_non_opted_in_identity_never_appears_even_via_its_exact_handle() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let (target_id, _target_token) = seed_identity_session(&pool).await;
     let (_searcher_id, searcher_token) = seed_identity_session(&pool).await;
@@ -370,8 +359,8 @@ async fn a_non_opted_in_identity_never_appears_even_via_its_exact_handle() {
 #[ignore]
 async fn a_blocked_searcher_gets_no_result_even_when_the_target_is_opted_in() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let (target_id, target_token) = seed_identity_session(&pool).await;
     let (_blocker_id, blocker_token) = seed_identity_session(&pool).await;
@@ -401,7 +390,7 @@ async fn a_blocked_searcher_gets_no_result_even_when_the_target_is_opted_in() {
 #[ignore]
 async fn search_requires_a_session_token() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let response = http
         .get(format!("{base}/identities/search?q=alice"))
@@ -421,8 +410,8 @@ async fn search_requires_a_session_token() {
 #[ignore]
 async fn discoverable_does_not_flip_when_the_rest_of_the_patch_fails() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
 
     let (identity_id, token) = seed_identity_session(&pool).await;
 

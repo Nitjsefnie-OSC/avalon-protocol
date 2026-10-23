@@ -18,9 +18,7 @@ use passkey_types::ctap2::Aaguid;
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
+mod common;
 
 fn rp_origin() -> url::Url {
     let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
@@ -198,7 +196,7 @@ async fn login(
 #[ignore]
 async fn registering_a_taken_display_name_is_rejected_at_register_start() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let name = format!("taken-name-{}", Uuid::new_v4());
 
     let (_first_id, _client, result) = register(&http, &base, &name, 1).await;
@@ -219,7 +217,7 @@ async fn registering_a_taken_display_name_is_rejected_at_register_start() {
 #[ignore]
 async fn renaming_to_a_taken_display_name_is_rejected_cleanly() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let name_a = format!("owner-name-{}", Uuid::new_v4());
     let name_b = format!("other-name-{}", Uuid::new_v4());
 
@@ -262,7 +260,7 @@ async fn renaming_to_a_taken_display_name_is_rejected_cleanly() {
 async fn two_concurrent_registrations_for_the_same_name_one_wins_one_is_rejected() {
     let http_a = reqwest::Client::new();
     let http_b = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let name = format!("racing-name-{}", Uuid::new_v4());
 
     let ((_, _, result_a), (_, _, result_b)) = tokio::join!(

@@ -23,22 +23,11 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
+mod common;
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -105,9 +94,9 @@ fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilde
 #[tokio::test]
 #[ignore]
 async fn publishing_presence_is_visible_via_get() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
 
     let publish = auth(http.put(format!("{base}/me/presence")), &alice_token)
@@ -136,9 +125,9 @@ async fn publishing_presence_is_visible_via_get() {
 #[tokio::test]
 #[ignore]
 async fn a_user_cannot_claim_to_be_playing_a_integrator() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
 
     // The request body has no `active_in` field at all in the wire format —
@@ -167,9 +156,9 @@ async fn a_user_cannot_claim_to_be_playing_a_integrator() {
 #[tokio::test]
 #[ignore]
 async fn missing_presence_reads_as_offline() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (_alice_id, alice_token) = seed_identity_session(&pool).await;
     let never_published = avalon_protocol::ids::IdentityId::random_for_tests();
 
@@ -199,9 +188,9 @@ async fn stale_presence_expires_to_offline() {
         .parse()
         .expect("AVALON_PRESENCE_TTL_SECS must be a number");
 
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
 
     auth(http.put(format!("{base}/me/presence")), &alice_token)
@@ -241,9 +230,9 @@ async fn assert_status_sticks_past_ttl(status: &str) {
         .parse()
         .expect("AVALON_PRESENCE_TTL_SECS must be a number");
 
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
 
     auth(http.put(format!("{base}/me/presence")), &alice_token)
@@ -298,9 +287,9 @@ async fn explicitly_setting_online_clears_a_sticky_override_and_resumes_ttl_trac
         .parse()
         .expect("AVALON_PRESENCE_TTL_SECS must be a number");
 
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
 
     auth(http.put(format!("{base}/me/presence")), &alice_token)
@@ -413,9 +402,9 @@ async fn integrator_auth_request(
 #[tokio::test]
 #[ignore]
 async fn a_bound_integrator_can_publish_its_own_playing_claim() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (alice_signing_key_id, alice_signing_key) = seed_signing_key(&pool, alice_id).await;
     let (integrator, signing_key) = register_unique_integrator(&http, &base).await;
@@ -474,9 +463,9 @@ async fn a_bound_integrator_can_publish_its_own_playing_claim() {
 #[tokio::test]
 #[ignore]
 async fn a_integrator_cannot_claim_to_be_playing_a_different_integrator() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (alice_signing_key_id, alice_signing_key) = seed_signing_key(&pool, alice_id).await;
     let (integrator, signing_key) = register_unique_integrator(&http, &base).await;
@@ -522,9 +511,9 @@ async fn a_integrator_cannot_claim_to_be_playing_a_different_integrator() {
 #[tokio::test]
 #[ignore]
 async fn a_integrator_cannot_publish_presence_for_an_unbound_identity() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, _alice_token) = seed_identity_session(&pool).await;
     let (integrator, signing_key) = register_unique_integrator(&http, &base).await;
     let slug = integrator["slug"].as_str().unwrap();
@@ -557,9 +546,9 @@ async fn a_integrator_cannot_publish_presence_for_an_unbound_identity() {
 #[tokio::test]
 #[ignore]
 async fn presence_visible_to_friends_only() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (alice_id, alice_token) = seed_identity_session(&pool).await;
     let (bob_id, bob_token) = seed_identity_session(&pool).await;
     let (_carol_id, carol_token) = seed_identity_session(&pool).await;

@@ -11,10 +11,11 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+mod common;
 
 /// #697/#698: seeds a real signing key for `identity_id` so a test can
 /// produce a genuine fresh-signature over HTTP, same pattern
@@ -45,18 +46,6 @@ fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> S
         message.push_str(field);
     }
     BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
-}
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
@@ -164,8 +153,8 @@ async fn create_guild_with_general_channel(
 #[ignore]
 async fn guild_creation_seeds_a_default_general_channel() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     // `create_guild_with_general_channel` itself asserts a `general`
     // channel exists on the freshly created guild.
@@ -196,8 +185,8 @@ async fn seed_membership_and_guild(
 #[ignore]
 async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
@@ -316,8 +305,8 @@ async fn channel_topic_round_trips_and_normalizes_blank_to_null() {
 #[ignore]
 async fn a_member_can_send_and_list_messages_in_order() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
@@ -361,8 +350,8 @@ async fn a_member_can_send_and_list_messages_in_order() {
 #[ignore]
 async fn pagination_walks_older_pages_via_before_cursor() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
@@ -428,8 +417,8 @@ async fn pagination_walks_older_pages_via_before_cursor() {
 #[ignore]
 async fn a_non_member_cannot_read_or_send_messages() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
@@ -462,8 +451,8 @@ async fn a_non_member_cannot_read_or_send_messages() {
 #[ignore]
 async fn an_archived_channel_rejects_new_posts() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
@@ -499,8 +488,8 @@ async fn an_archived_channel_rejects_new_posts() {
 #[ignore]
 async fn manage_channels_can_hard_delete_a_message() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
@@ -553,8 +542,8 @@ async fn manage_channels_can_hard_delete_a_message() {
 #[ignore]
 async fn a_message_body_over_the_length_cap_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
@@ -650,8 +639,8 @@ async fn set_announcement_only(
 #[ignore]
 async fn announcement_only_channel_blocks_a_plain_member_base_only() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
@@ -678,8 +667,8 @@ async fn announcement_only_channel_blocks_a_plain_member_base_only() {
 #[ignore]
 async fn announcement_only_channel_grant_override_allows_a_plain_member_to_post() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
@@ -720,8 +709,8 @@ async fn announcement_only_channel_grant_override_allows_a_plain_member_to_post(
 #[ignore]
 async fn deny_override_blocks_an_officer_from_managing_one_specific_channel() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (officer_id, officer_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
@@ -772,8 +761,8 @@ async fn deny_override_blocks_an_officer_from_managing_one_specific_channel() {
 #[ignore]
 async fn owner_bypasses_a_deny_override_on_a_channel() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
 
@@ -847,8 +836,8 @@ async fn set_channel_public(
 #[ignore]
 async fn a_public_channel_is_visible_to_a_non_member_of_a_public_guild() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_stranger_id, stranger_token) = seed_identity_session(&pool).await;
     let (guild_id, general_channel_id) =
@@ -912,8 +901,8 @@ async fn a_public_channel_is_visible_to_a_non_member_of_a_public_guild() {
 #[ignore]
 async fn view_details_denied_on_a_channel_blocks_message_reads_but_not_listing() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;
@@ -992,8 +981,8 @@ async fn view_details_denied_on_a_channel_blocks_message_reads_but_not_listing()
 #[ignore]
 async fn setting_a_permission_override_without_a_signature_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let (guild_id, channel_id) = seed_membership_and_guild(&http, &base, &owner_token).await;

@@ -8,10 +8,11 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+mod common;
 
 /// #697/#698: seeds a real signing key for `identity_id` so a test can
 /// produce a genuine fresh-signature over HTTP, same pattern
@@ -42,18 +43,6 @@ fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> S
         message.push_str(field);
     }
     BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
-}
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
@@ -103,8 +92,8 @@ async fn start_pairing(http: &reqwest::Client, base: &str) -> serde_json::Value 
 #[ignore]
 async fn full_round_trip_start_approve_poll_delivers_a_real_session_exactly_once() {
     let http = reqwest::Client::new();
-    let pool = test_pool().await;
-    let base = server_url();
+    let pool = common::test_pool().await;
+    let base = common::server_url();
     let (identity_id, approver_token) = seed_identity_session(&pool).await;
 
     let start = start_pairing(&http, &base).await;
@@ -193,8 +182,8 @@ async fn full_round_trip_start_approve_poll_delivers_a_real_session_exactly_once
 #[ignore]
 async fn approving_with_only_the_ambient_session_and_no_signing_key_is_rejected() {
     let http = reqwest::Client::new();
-    let pool = test_pool().await;
-    let base = server_url();
+    let pool = common::test_pool().await;
+    let base = common::server_url();
     let (_identity_id, approver_token) = seed_identity_session(&pool).await;
 
     let start = start_pairing(&http, &base).await;
@@ -220,8 +209,8 @@ async fn approving_with_only_the_ambient_session_and_no_signing_key_is_rejected(
 #[ignore]
 async fn approving_with_a_registered_key_but_no_signature_is_rejected() {
     let http = reqwest::Client::new();
-    let pool = test_pool().await;
-    let base = server_url();
+    let pool = common::test_pool().await;
+    let base = common::server_url();
     let (identity_id, approver_token) = seed_identity_session(&pool).await;
     seed_signing_key(&pool, identity_id).await;
 
@@ -245,8 +234,8 @@ async fn approving_with_a_registered_key_but_no_signature_is_rejected() {
 #[ignore]
 async fn approving_with_the_wrong_user_code_fails() {
     let http = reqwest::Client::new();
-    let pool = test_pool().await;
-    let base = server_url();
+    let pool = common::test_pool().await;
+    let base = common::server_url();
     let (_identity_id, approver_token) = seed_identity_session(&pool).await;
 
     let _start = start_pairing(&http, &base).await;
@@ -266,8 +255,8 @@ async fn approving_with_the_wrong_user_code_fails() {
 #[ignore]
 async fn a_denied_pairing_polls_denied_and_can_never_be_approved_afterward() {
     let http = reqwest::Client::new();
-    let pool = test_pool().await;
-    let base = server_url();
+    let pool = common::test_pool().await;
+    let base = common::server_url();
     let (_identity_id, approver_token) = seed_identity_session(&pool).await;
 
     let start = start_pairing(&http, &base).await;
@@ -309,7 +298,7 @@ async fn a_denied_pairing_polls_denied_and_can_never_be_approved_afterward() {
 #[ignore]
 async fn polling_faster_than_the_advertised_interval_returns_slow_down() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let start = start_pairing(&http, &base).await;
     let device_code = start["device_code"].as_str().unwrap().to_string();
@@ -339,7 +328,7 @@ async fn polling_faster_than_the_advertised_interval_returns_slow_down() {
 #[ignore]
 async fn polling_an_unknown_device_code_is_unauthorized() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let response = auth(
         http.post(format!("{base}/auth/device/poll")),

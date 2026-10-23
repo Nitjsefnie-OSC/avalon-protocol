@@ -36,27 +36,16 @@ use passkey_authenticator::{Authenticator, MemoryStore, MockUserValidationMethod
 use passkey_client::{Client, DefaultClientData, Origin};
 use passkey_types::ctap2::Aaguid;
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::time::Duration;
 use uuid::Uuid;
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
+mod common;
 
 fn rp_origin() -> url::Url {
     let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
         .unwrap_or_else(|_| "http://localhost:8080".to_string());
     url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 type VirtualClient = Client<
@@ -358,9 +347,9 @@ const REBUILD_TEST_CHARACTER_PROTO: &str =
 #[tokio::test]
 #[ignore]
 async fn rebuild_reproduces_integrator_data_deletion() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let integrator = register_integrator(&http, &base).await;
     let (subject_id, subject_token, subject_signing_key, subject_signing_key_id) =
@@ -524,9 +513,9 @@ async fn rebuild_reproduces_integrator_data_deletion() {
 #[tokio::test]
 #[ignore]
 async fn rebuild_reproduces_projections_exactly() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (alice_id, alice_token, ..) = register_and_login(&http, &base).await;
     let (bob_id, bob_token, ..) = register_and_login(&http, &base).await;
@@ -694,9 +683,9 @@ async fn rebuild_reproduces_rollback_reversals() {
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
 
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (alice_id, alice_token, ..) = register_and_login(&http, &base).await;
     let (bob_id, bob_token, bob_key, bob_key_id) = register_and_login(&http, &base).await;
@@ -895,9 +884,9 @@ async fn rebuild_reproduces_rollback_reversals() {
 #[tokio::test]
 #[ignore]
 async fn replay_onto_rebuilt_index_is_noop() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (_alice_id, alice_token, ..) = register_and_login(&http, &base).await;
     auth(http.patch(format!("{base}/me")), &alice_token)

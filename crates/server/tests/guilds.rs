@@ -10,10 +10,11 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+mod common;
 
 /// #697/#698: seeds a real signing key for `identity_id` so a test can
 /// produce a genuine fresh-signature over HTTP, same pattern
@@ -44,18 +45,6 @@ fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> S
         message.push_str(field);
     }
     BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
-}
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 /// Seeds a bare identity + session, bypassing WebAuthn entirely, and
@@ -108,8 +97,8 @@ fn unique_guild_body() -> serde_json::Value {
 #[ignore]
 async fn creating_a_guild_makes_the_creator_the_owner() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
     let create = auth(http.post(format!("{base}/guilds")), &token)
@@ -150,8 +139,8 @@ async fn creating_a_guild_makes_the_creator_the_owner() {
 #[ignore]
 async fn creating_a_role_with_description_and_badge_round_trips() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -222,8 +211,8 @@ async fn creating_a_role_with_description_and_badge_round_trips() {
 #[ignore]
 async fn creating_a_role_with_an_unknown_badge_icon_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -256,8 +245,8 @@ async fn creating_a_role_with_an_unknown_badge_icon_is_rejected() {
 #[ignore]
 async fn creating_a_role_with_a_name_already_taken_in_the_guild_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -309,8 +298,8 @@ async fn creating_a_role_with_a_name_already_taken_in_the_guild_is_rejected() {
 #[ignore]
 async fn the_owner_role_can_be_renamed_but_not_have_its_permissions_changed() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -362,8 +351,8 @@ async fn the_owner_role_can_be_renamed_but_not_have_its_permissions_changed() {
 #[ignore]
 async fn deleting_a_role() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -457,8 +446,8 @@ async fn deleting_a_role() {
 #[ignore]
 async fn deleting_a_role_still_held_by_a_member_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (other_id, other_token) = seed_identity_session(&pool).await;
 
@@ -543,8 +532,8 @@ async fn deleting_a_role_still_held_by_a_member_is_rejected() {
 #[ignore]
 async fn guild_name_is_unique_case_insensitively() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_id, token) = seed_identity_session(&pool).await;
 
     let mut body = unique_guild_body();
@@ -570,8 +559,8 @@ async fn guild_name_is_unique_case_insensitively() {
 #[ignore]
 async fn guild_tag_is_unique_case_insensitively() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_id, token) = seed_identity_session(&pool).await;
 
     let mut body = unique_guild_body();
@@ -597,8 +586,8 @@ async fn guild_tag_is_unique_case_insensitively() {
 #[ignore]
 async fn transferring_ownership_leaves_exactly_one_owner() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (new_owner_id, _new_owner_token) = seed_identity_session(&pool).await;
 
@@ -666,8 +655,8 @@ async fn transferring_ownership_leaves_exactly_one_owner() {
 #[ignore]
 async fn transferring_ownership_without_a_signature_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (new_owner_id, _new_owner_token) = seed_identity_session(&pool).await;
 
@@ -706,8 +695,8 @@ async fn transferring_ownership_without_a_signature_is_rejected() {
 #[ignore]
 async fn a_role_change_by_a_non_manager_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_other_id, other_token) = seed_identity_session(&pool).await;
 
@@ -736,7 +725,7 @@ async fn a_role_change_by_a_non_manager_is_rejected() {
 #[ignore]
 async fn guild_endpoints_require_a_session_token() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let create = http
         .post(format!("{base}/guilds"))
@@ -760,8 +749,8 @@ async fn guild_endpoints_require_a_session_token() {
 #[ignore]
 async fn creating_a_guild_makes_the_owner_a_member() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
     let create = auth(http.post(format!("{base}/guilds")), &token)
@@ -795,8 +784,8 @@ async fn creating_a_guild_makes_the_owner_a_member() {
 #[ignore]
 async fn invite_accept_join_and_leave_flow() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (invitee_id, invitee_token) = seed_identity_session(&pool).await;
 
@@ -909,8 +898,8 @@ async fn invite_accept_join_and_leave_flow() {
 #[ignore]
 async fn joining_an_invite_only_guild_directly_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_other_id, other_token) = seed_identity_session(&pool).await;
 
@@ -939,8 +928,8 @@ async fn joining_an_invite_only_guild_directly_is_rejected() {
 #[ignore]
 async fn opening_a_guild_lets_a_stranger_join_directly_bypassing_requests_and_invites() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (other_id, other_token) = seed_identity_session(&pool).await;
 
@@ -998,8 +987,8 @@ async fn opening_a_guild_lets_a_stranger_join_directly_bypassing_requests_and_in
 #[ignore]
 async fn the_owner_cannot_leave_or_be_removed() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let create = auth(http.post(format!("{base}/guilds")), &owner_token)
@@ -1033,8 +1022,8 @@ async fn the_owner_cannot_leave_or_be_removed() {
 #[ignore]
 async fn an_officer_cannot_remove_another_officer_without_manage_roles() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (officer_a_id, officer_a_token) = seed_identity_session(&pool).await;
     let (officer_b_id, officer_b_token) = seed_identity_session(&pool).await;
@@ -1114,8 +1103,8 @@ async fn an_officer_cannot_remove_another_officer_without_manage_roles() {
 #[ignore]
 async fn guild_metadata_round_trips_through_patch_and_get() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -1205,8 +1194,8 @@ async fn guild_metadata_round_trips_through_patch_and_get() {
 #[ignore]
 async fn invalid_guild_metadata_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -1290,8 +1279,8 @@ async fn set_recruiting(
 #[ignore]
 async fn recruiting_filter_excludes_non_recruiting_guilds_from_general_browse() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_stranger_id, stranger_token) = seed_identity_session(&pool).await;
 
@@ -1382,8 +1371,8 @@ async fn recruiting_filter_excludes_non_recruiting_guilds_from_general_browse() 
 #[ignore]
 async fn a_member_still_sees_their_own_non_recruiting_guild_in_default_browse() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let closed_guild = create_guild(&http, &base, &owner_token, "Own Closed Guild").await;
@@ -1413,8 +1402,8 @@ async fn a_member_still_sees_their_own_non_recruiting_guild_in_default_browse() 
 #[ignore]
 async fn discover_card_includes_banner_and_icon() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let with_media = create_guild(&http, &base, &owner_token, "Media Guild").await;
@@ -1472,8 +1461,8 @@ async fn discover_card_includes_banner_and_icon() {
 #[ignore]
 async fn search_matches_name_and_tag_substrings_case_insensitively() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let suffix = Uuid::new_v4().simple().to_string();
@@ -1520,8 +1509,8 @@ async fn search_matches_name_and_tag_substrings_case_insensitively() {
 #[ignore]
 async fn pagination_does_not_skip_or_duplicate_rows_across_pages() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let mut created_ids = Vec::new();
@@ -1673,8 +1662,8 @@ async fn invite_and_accept(
 #[ignore]
 async fn game_breakdown_reflects_active_bindings_and_updates_as_they_change() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
 
@@ -1782,8 +1771,8 @@ async fn game_breakdown_reflects_active_bindings_and_updates_as_they_change() {
 #[ignore]
 async fn game_breakdown_public_toggle_gates_exposure_to_non_members() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_stranger_id, stranger_token) = seed_identity_session(&pool).await;
 
@@ -1862,8 +1851,8 @@ async fn game_breakdown_public_toggle_gates_exposure_to_non_members() {
 #[ignore]
 async fn pin_reorder_and_unpin_round_trip() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let create = auth(http.post(format!("{base}/guilds")), &owner_token)
@@ -1976,8 +1965,8 @@ async fn pin_reorder_and_unpin_round_trip() {
 #[ignore]
 async fn a_sixth_pin_is_rejected_over_http() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let create = auth(http.post(format!("{base}/guilds")), &owner_token)
@@ -2013,8 +2002,8 @@ async fn a_sixth_pin_is_rejected_over_http() {
 #[ignore]
 async fn a_stale_pin_is_flagged_but_not_auto_removed() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
     let create = auth(http.post(format!("{base}/guilds")), &owner_token)
@@ -2076,8 +2065,8 @@ async fn member_count(http: &reqwest::Client, base: &str, token: &str, guild_id:
 #[ignore]
 async fn applying_to_a_recruiting_guild_succeeds_and_is_listed_pending() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2121,8 +2110,8 @@ async fn applying_to_a_recruiting_guild_succeeds_and_is_listed_pending() {
 #[ignore]
 async fn applying_to_a_non_recruiting_guild_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2148,8 +2137,8 @@ async fn applying_to_a_non_recruiting_guild_is_rejected() {
 #[ignore]
 async fn duplicate_apply_while_pending_is_idempotent() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2190,8 +2179,8 @@ async fn duplicate_apply_while_pending_is_idempotent() {
 #[ignore]
 async fn approving_a_join_request_adds_membership() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2249,8 +2238,8 @@ async fn approving_a_join_request_adds_membership() {
 #[ignore]
 async fn rejecting_a_join_request_leaves_membership_unchanged() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2289,8 +2278,8 @@ async fn rejecting_a_join_request_leaves_membership_unchanged() {
 #[ignore]
 async fn withdrawing_a_join_request_leaves_membership_unchanged() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2339,8 +2328,8 @@ async fn withdrawing_a_join_request_leaves_membership_unchanged() {
 #[ignore]
 async fn non_manager_cannot_approve_or_reject_a_join_request() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
     let (_bystander_id, bystander_token) = seed_identity_session(&pool).await;
@@ -2389,8 +2378,8 @@ async fn non_manager_cannot_approve_or_reject_a_join_request() {
 #[ignore]
 async fn only_the_applicant_can_withdraw_their_own_join_request() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
     let (_bystander_id, bystander_token) = seed_identity_session(&pool).await;
@@ -2457,8 +2446,8 @@ async fn only_the_applicant_can_withdraw_their_own_join_request() {
 #[ignore]
 async fn my_join_request_returns_own_pending_request_or_none() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2518,8 +2507,8 @@ async fn my_join_request_returns_own_pending_request_or_none() {
 #[ignore]
 async fn my_join_request_never_returns_another_identitys_request() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
     let (_bystander_id, bystander_token) = seed_identity_session(&pool).await;
@@ -2579,8 +2568,8 @@ async fn my_join_request_never_returns_another_identitys_request() {
 #[ignore]
 async fn my_join_request_then_withdraw_is_reachable_end_to_end() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_applicant_id, applicant_token) = seed_identity_session(&pool).await;
 
@@ -2636,8 +2625,8 @@ async fn my_join_request_then_withdraw_is_reachable_end_to_end() {
 #[ignore]
 async fn creating_a_role_without_a_signature_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, token) = seed_identity_session(&pool).await;
 
     let create_guild = auth(http.post(format!("{base}/guilds")), &token)
@@ -2682,8 +2671,8 @@ async fn creating_a_role_without_a_signature_is_rejected() {
 #[ignore]
 async fn escalating_a_member_role_without_a_signature_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (other_id, other_token) = seed_identity_session(&pool).await;
 

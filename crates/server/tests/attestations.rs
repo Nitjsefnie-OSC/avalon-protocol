@@ -12,24 +12,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::header::HeaderMap;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 mod attestation_support;
+mod common;
 use attestation_support::{issue_bytes, now_micros};
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
-}
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
     let who = avalon_protocol::identity_id::TestIdentity::new();
@@ -180,8 +168,8 @@ fn evidence_of_size(total_bytes: usize) -> serde_json::Value {
 #[ignore]
 async fn a_integrator_issues_a_signed_achievement_to_a_bound_consenting_user() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     let integrator = register_issuer(&http, &base, "game", &["achievements.issue"]).await;
 
@@ -278,8 +266,8 @@ async fn a_integrator_issues_a_signed_achievement_to_a_bound_consenting_user() {
 #[ignore]
 async fn an_app_issues_a_signed_milestone_to_a_bound_consenting_user() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     let app = register_issuer(&http, &base, "app", &["milestones.issue"]).await;
 
@@ -357,8 +345,8 @@ async fn an_app_issues_a_signed_milestone_to_a_bound_consenting_user() {
 #[ignore]
 async fn a_tampered_signature_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     let integrator = register_issuer(&http, &base, "game", &["achievements.issue"]).await;
 
@@ -416,8 +404,8 @@ async fn a_tampered_signature_is_rejected() {
 #[ignore]
 async fn issuance_to_a_non_bound_identity_is_forbidden() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, _token) = seed_identity_session(&pool).await;
     let integrator = register_issuer(&http, &base, "game", &["achievements.issue"]).await;
 
@@ -475,8 +463,8 @@ async fn issuance_to_a_non_bound_identity_is_forbidden() {
 #[ignore]
 async fn issuance_against_a_retired_definition_conflicts() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     let integrator = register_issuer(&http, &base, "game", &["achievements.issue"]).await;
 
@@ -557,8 +545,8 @@ async fn issuance_against_a_retired_definition_conflicts() {
 #[ignore]
 async fn evidence_over_the_byte_cap_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     let integrator = register_issuer(&http, &base, "game", &["achievements.issue"]).await;
 
@@ -652,8 +640,8 @@ async fn evidence_over_the_byte_cap_is_rejected() {
 #[ignore]
 async fn evidence_at_the_byte_cap_is_accepted() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
     let integrator = register_issuer(&http, &base, "game", &["achievements.issue"]).await;
 
@@ -734,8 +722,8 @@ async fn list_my_achievements_paginates_and_filters_by_integrator_and_claim_kind
     // read-side filtering/pagination, so the attestation rows are seeded
     // directly rather than issued through a real signed ceremony each.
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (identity_id, token) = seed_identity_session(&pool).await;
 
     let game = register_issuer(&http, &base, "game", &[]).await;

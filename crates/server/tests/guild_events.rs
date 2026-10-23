@@ -8,10 +8,11 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+mod common;
 
 /// #697/#698: seeds a real signing key for `identity_id` so a test can
 /// produce a genuine fresh-signature over HTTP, same pattern
@@ -42,18 +43,6 @@ fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> S
         message.push_str(field);
     }
     BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
-}
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
@@ -167,8 +156,8 @@ async fn set_guild_public(
 #[ignore]
 async fn create_rsvp_as_two_members_and_list_shows_both_responses() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -266,8 +255,8 @@ async fn create_rsvp_as_two_members_and_list_shows_both_responses() {
 #[ignore]
 async fn my_rsvp_is_null_until_the_caller_responds() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let (_owner_id, owner_token) = seed_identity_session(&test_pool().await).await;
+    let base = common::server_url();
+    let (_owner_id, owner_token) = seed_identity_session(&common::test_pool().await).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
     let create = auth(
@@ -305,8 +294,8 @@ async fn my_rsvp_is_null_until_the_caller_responds() {
 #[ignore]
 async fn rsvp_is_idempotent_per_event_and_identity() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
@@ -360,8 +349,8 @@ async fn rsvp_is_idempotent_per_event_and_identity() {
 #[ignore]
 async fn deleting_an_event_removes_its_rsvps() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
@@ -407,8 +396,8 @@ async fn deleting_an_event_removes_its_rsvps() {
 #[ignore]
 async fn a_non_member_cannot_view_or_rsvp() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -448,8 +437,8 @@ async fn a_non_member_cannot_view_or_rsvp() {
 #[ignore]
 async fn a_member_without_manage_channels_cannot_create_events() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -541,8 +530,8 @@ async fn create_event(
 #[ignore]
 async fn grant_override_lets_a_plain_member_manage_one_specific_event() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -598,8 +587,8 @@ async fn grant_override_lets_a_plain_member_manage_one_specific_event() {
 #[ignore]
 async fn deny_override_blocks_an_officer_from_deleting_one_specific_event() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (officer_id, officer_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -640,8 +629,8 @@ async fn deny_override_blocks_an_officer_from_deleting_one_specific_event() {
 #[ignore]
 async fn owner_bypasses_a_deny_override_on_an_event() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
@@ -676,8 +665,8 @@ async fn owner_bypasses_a_deny_override_on_an_event() {
 #[ignore]
 async fn override_on_a_deleted_event_is_inert_not_an_error() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -726,8 +715,8 @@ async fn override_on_a_deleted_event_is_inert_not_an_error() {
 #[ignore]
 async fn rsvp_roster_lists_every_response_with_identity_and_status() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -798,8 +787,8 @@ async fn rsvp_roster_lists_every_response_with_identity_and_status() {
 #[ignore]
 async fn rsvp_roster_is_empty_when_nobody_has_responded() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
 
@@ -830,8 +819,8 @@ async fn rsvp_roster_is_empty_when_nobody_has_responded() {
 #[ignore]
 async fn a_non_member_cannot_view_the_rsvp_roster() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -864,8 +853,8 @@ async fn a_non_member_cannot_view_the_rsvp_roster() {
 #[ignore]
 async fn requesting_another_guilds_event_id_under_a_different_guild_is_not_found() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_a_id, owner_a_token) = seed_identity_session(&pool).await;
     let (_owner_b_id, owner_b_token) = seed_identity_session(&pool).await;
     let guild_a_id = create_guild_with_owner(&http, &base, &owner_a_token).await;
@@ -904,8 +893,8 @@ async fn requesting_another_guilds_event_id_under_a_different_guild_is_not_found
 #[ignore]
 async fn a_non_member_of_a_public_guild_sees_only_public_events() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_outsider_id, outsider_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -1000,8 +989,8 @@ async fn a_non_member_of_a_public_guild_sees_only_public_events() {
 #[ignore]
 async fn a_member_sees_every_event_regardless_of_public_flag() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -1043,8 +1032,8 @@ async fn a_member_sees_every_event_regardless_of_public_flag() {
 #[ignore]
 async fn denying_view_on_one_event_hides_it_from_that_member_only() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;
@@ -1117,8 +1106,8 @@ async fn denying_view_on_one_event_hides_it_from_that_member_only() {
 #[ignore]
 async fn denying_view_details_leaves_the_event_visible_but_strips_its_content() {
     let http = reqwest::Client::new();
-    let base = server_url();
-    let pool = test_pool().await;
+    let base = common::server_url();
+    let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
     let guild_id = create_guild_with_owner(&http, &base, &owner_token).await;

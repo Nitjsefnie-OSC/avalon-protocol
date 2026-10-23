@@ -12,25 +12,14 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod common;
+
 fn network_id() -> String {
     std::env::var("AVALON_NETWORK_ID").unwrap_or_else(|_| "avalon-dev-local".to_string())
-}
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::IdentityId, String) {
@@ -177,9 +166,9 @@ fn revoke_body(
 #[tokio::test]
 #[ignore]
 async fn a_grant_approved_by_a_valid_trusted_key_succeeds_and_the_new_key_is_registered() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (trusted_key_id, trusted_key) = seed_signing_key(&pool, identity_id).await;
@@ -254,9 +243,9 @@ async fn a_grant_approved_by_a_valid_trusted_key_succeeds_and_the_new_key_is_reg
 #[tokio::test]
 #[ignore]
 async fn an_approval_attempt_from_a_revoked_key_is_rejected() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (revoked_key_id, revoked_key) = seed_signing_key(&pool, identity_id).await;
@@ -316,9 +305,9 @@ async fn an_approval_attempt_from_a_revoked_key_is_rejected() {
 #[tokio::test]
 #[ignore]
 async fn revoking_one_device_does_not_affect_another() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (key_a_id, _key_a) = seed_signing_key(&pool, identity_id).await;
@@ -369,9 +358,9 @@ async fn revoking_one_device_does_not_affect_another() {
 #[tokio::test]
 #[ignore]
 async fn a_device_can_be_renamed_and_the_rename_is_scoped_to_its_own_identity() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_a, token_a) = seed_identity_session(&pool).await;
     let (key_id, _key) = seed_signing_key(&pool, identity_a).await;
@@ -416,9 +405,9 @@ async fn a_device_can_be_renamed_and_the_rename_is_scoped_to_its_own_identity() 
 #[tokio::test]
 #[ignore]
 async fn a_revocation_signed_by_another_identitys_key_or_a_revoked_key_is_refused() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (key_a_id, key_a) = seed_signing_key(&pool, identity_id).await;
@@ -473,9 +462,9 @@ async fn a_revocation_signed_by_another_identitys_key_or_a_revoked_key_is_refuse
 #[tokio::test]
 #[ignore]
 async fn the_last_active_signing_key_cannot_be_revoked() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (key_id, key) = seed_signing_key(&pool, identity_id).await;
@@ -495,9 +484,9 @@ async fn the_last_active_signing_key_cannot_be_revoked() {
 #[tokio::test]
 #[ignore]
 async fn two_keys_revoking_each_other_concurrently_leave_one_active() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (key_a_id, key_a) = seed_signing_key(&pool, identity_id).await;
@@ -560,7 +549,7 @@ async fn two_keys_revoking_each_other_concurrently_leave_one_active() {
 
 async fn request_grant(http: &reqwest::Client, token: &str, public_key: &[u8; 32]) -> Uuid {
     let grant: serde_json::Value = auth(
-        http.post(format!("{}/me/devices/grants", server_url())),
+        http.post(format!("{}/me/devices/grants", common::server_url())),
         token,
     )
     .json(&serde_json::json!({
@@ -579,9 +568,9 @@ async fn request_grant(http: &reqwest::Client, token: &str, public_key: &[u8; 32
 #[tokio::test]
 #[ignore]
 async fn a_key_event_signed_at_a_stale_position_is_refused_with_the_head_and_resigns() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (trusted_id, trusted) = seed_signing_key(&pool, identity_id).await;
     let first_device = SigningKey::generate(&mut rand::rng())
@@ -642,13 +631,16 @@ async fn a_key_event_signed_at_a_stale_position_is_refused_with_the_head_and_res
 }
 
 async fn devices_ids(http: &reqwest::Client, token: &str) -> Vec<String> {
-    let devices: serde_json::Value = auth(http.get(format!("{}/me/devices", server_url())), token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let devices: serde_json::Value = auth(
+        http.get(format!("{}/me/devices", common::server_url())),
+        token,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     devices
         .as_array()
         .unwrap()
@@ -660,9 +652,9 @@ async fn devices_ids(http: &reqwest::Client, token: &str) -> Vec<String> {
 #[tokio::test]
 #[ignore]
 async fn a_signature_does_not_carry_over_to_another_approver_id_position_or_malformed_head() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (trusted_id, trusted) = seed_signing_key(&pool, identity_id).await;
     let (other_id, _other) = seed_signing_key(&pool, identity_id).await;
@@ -708,9 +700,9 @@ async fn a_signature_does_not_carry_over_to_another_approver_id_position_or_malf
 #[tokio::test]
 #[ignore]
 async fn a_revocation_signed_at_a_stale_position_is_refused_with_the_head() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (a_id, a) = seed_signing_key(&pool, identity_id).await;
     let (b_id, b) = seed_signing_key(&pool, identity_id).await;
@@ -770,9 +762,9 @@ async fn one_wins_one_stale(first: reqwest::Response, second: reqwest::Response)
 #[tokio::test]
 #[ignore]
 async fn two_concurrent_approvals_at_the_same_head_leave_one_and_a_stale_refusal() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (trusted_id, trusted) = seed_signing_key(&pool, identity_id).await;
     let keys = [
@@ -810,9 +802,9 @@ async fn two_concurrent_approvals_at_the_same_head_leave_one_and_a_stale_refusal
 #[tokio::test]
 #[ignore]
 async fn two_concurrent_revocations_at_the_same_head_leave_one_and_a_stale_refusal() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
     let (identity_id, token) = seed_identity_session(&pool).await;
     let (a_id, _a) = seed_signing_key(&pool, identity_id).await;
     let (b_id, _b) = seed_signing_key(&pool, identity_id).await;

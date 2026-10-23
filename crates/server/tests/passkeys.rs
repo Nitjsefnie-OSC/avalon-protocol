@@ -21,9 +21,10 @@ use passkey_authenticator::{Authenticator, MemoryStore, MockUserValidationMethod
 use passkey_client::{Client, DefaultClientData, Origin};
 use passkey_types::ctap2::Aaguid;
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+mod common;
 
 /// #697/#698: seeds a real signing key for `identity_id` so a test can
 /// produce a genuine fresh-signature over HTTP, same pattern
@@ -56,22 +57,10 @@ fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> S
     BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
 }
 
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
-}
-
 fn rp_origin() -> url::Url {
     let origin = std::env::var("AVALON_WEBAUTHN_ORIGIN")
         .unwrap_or_else(|_| "http://localhost:8080".to_string());
     url::Url::parse(&origin).expect("AVALON_WEBAUTHN_ORIGIN must be a valid URL")
-}
-
-async fn test_pool() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to Postgres — is it reachable?")
 }
 
 /// Named so `Client`'s registration/authentication ceremony state can be
@@ -214,9 +203,9 @@ fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilde
 #[tokio::test]
 #[ignore]
 async fn register_second_passkey_authenticate_with_either_then_revoke_one() {
-    let pool = test_pool().await;
+    let pool = common::test_pool().await;
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, mut client_a) = create_identity_with_one_passkey(&http, &base).await;
     let token = login_with_client(&http, &base, identity_id, &mut client_a).await;

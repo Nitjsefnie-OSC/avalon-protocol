@@ -23,12 +23,10 @@ use uuid::Uuid;
 
 use avalon_protocol::continuation::{signing_bytes, ContinuationToken, DEFAULT_TTL_SECONDS};
 
+mod common;
+
 fn network_id() -> String {
     std::env::var("AVALON_NETWORK_ID").unwrap_or_else(|_| "avalon-dev-local".to_string())
-}
-
-fn server_url() -> String {
-    std::env::var("AVALON_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
 }
 
 fn rp_origin() -> url::Url {
@@ -197,7 +195,7 @@ fn mint_token(
 #[ignore]
 async fn a_valid_continuation_token_authenticates_like_a_real_session() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -231,7 +229,7 @@ async fn a_valid_continuation_token_authenticates_like_a_real_session() {
 #[ignore]
 async fn a_continuation_token_cannot_be_replayed() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -272,7 +270,7 @@ async fn a_continuation_token_cannot_be_replayed() {
 #[ignore]
 async fn an_expired_continuation_token_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -302,7 +300,7 @@ async fn an_expired_continuation_token_is_rejected() {
 #[ignore]
 async fn a_continuation_token_claiming_too_long_a_ttl_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -331,7 +329,7 @@ async fn a_continuation_token_claiming_too_long_a_ttl_is_rejected() {
 #[ignore]
 async fn a_continuation_token_signed_by_the_wrong_key_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, _real_signing_key) =
         create_identity_and_log_in(&http, &base).await;
@@ -365,7 +363,7 @@ async fn a_continuation_token_signed_by_the_wrong_key_is_rejected() {
 #[ignore]
 async fn a_continuation_token_signed_by_a_revoked_key_is_rejected() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
@@ -483,7 +481,7 @@ async fn a_continuation_token_signed_by_a_revoked_key_is_rejected() {
 #[ignore]
 async fn a_continuation_token_is_never_accepted_by_the_registration_endpoints() {
     let http = reqwest::Client::new();
-    let base = server_url();
+    let base = common::server_url();
 
     let (identity_id, session_token, signing_key) = create_identity_and_log_in(&http, &base).await;
     let signing_key_id = first_signing_key_id(&http, &base, &session_token).await;
