@@ -1,0 +1,55 @@
+name: Avalon fork clean-build probe (osc adv 1393)
+
+# Fork-only, dispatch-only workflow backing avalon-protocol#1393: a timed
+# cold build of the server crate's integration-test binaries, with no Rust
+# cache. This file is intentionally not sent upstream.
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Git branch, tag, or 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avalon-osc-adv-1393-cleanbuild-${{ inputs.target_ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clean-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout candidate ref
+        uses: actions/checkout@v7
+        with:
+          repository: Nitjsefnie-OSC/avalon-protocol
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Report checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - name: Cold build of the server crate's test binaries (no cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          cargo test --no-run -p avalon-server
+          elapsed=$((SECONDS - start))
+          printf 'clean-build-seconds: %d (%dm%02ds)\n' "$elapsed" $((elapsed / 60)) $((elapsed % 60))
