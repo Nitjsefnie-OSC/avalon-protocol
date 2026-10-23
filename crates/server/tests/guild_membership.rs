@@ -6,13 +6,12 @@ mod common;
 mod guild_support;
 
 use guild_support::{
-    auth, create_guild, seed_identity_session, seed_signing_key, set_recruiting, sign_action,
-    unique_guild_body,
+    create_guild, seed_identity_session, seed_signing_key, set_recruiting, unique_guild_body,
 };
 
 async fn member_count(http: &reqwest::Client, base: &str, token: &str, guild_id: &str) -> usize {
     let members: serde_json::Value =
-        auth(http.get(format!("{base}/guilds/{guild_id}/members")), token)
+        common::auth(http.get(format!("{base}/guilds/{guild_id}/members")), token)
             .send()
             .await
             .unwrap()
@@ -30,7 +29,7 @@ async fn creating_a_guild_makes_the_owner_a_member() {
     let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -38,7 +37,7 @@ async fn creating_a_guild_makes_the_owner_a_member() {
     let body: serde_json::Value = create.json().await.unwrap();
     let guild_id = body["id"].as_str().unwrap();
 
-    let members: serde_json::Value = auth(
+    let members: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/members")),
         &token,
     )
@@ -66,7 +65,7 @@ async fn invite_accept_join_and_leave_flow() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (invitee_id, invitee_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -74,7 +73,7 @@ async fn invite_accept_join_and_leave_flow() {
     let body: serde_json::Value = create.json().await.unwrap();
     let guild_id = body["id"].as_str().unwrap();
 
-    let invite = auth(
+    let invite = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/invites")),
         &owner_token,
     )
@@ -88,7 +87,7 @@ async fn invite_accept_join_and_leave_flow() {
 
     // Re-inviting while the first invite is still pending is idempotent —
     // same invite id back, not a new row or an error.
-    let duplicate = auth(
+    let duplicate = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/invites")),
         &owner_token,
     )
@@ -103,7 +102,7 @@ async fn invite_accept_join_and_leave_flow() {
     // Issue #442: the invitee can discover the invite themselves, without
     // being told its id out of band.
     let my_invites: serde_json::Value =
-        auth(http.get(format!("{base}/me/guild-invites")), &invitee_token)
+        common::auth(http.get(format!("{base}/me/guild-invites")), &invitee_token)
             .send()
             .await
             .unwrap()
@@ -115,7 +114,7 @@ async fn invite_accept_join_and_leave_flow() {
     assert_eq!(my_invites[0]["id"].as_str().unwrap(), invite_id);
     assert_eq!(my_invites[0]["guild_id"].as_str().unwrap(), guild_id);
 
-    let accept = auth(
+    let accept = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/invites/{invite_id}/accept"
         )),
@@ -128,7 +127,7 @@ async fn invite_accept_join_and_leave_flow() {
 
     // Resolved invites must not linger in the "receiving end" listing.
     let my_invites_after: serde_json::Value =
-        auth(http.get(format!("{base}/me/guild-invites")), &invitee_token)
+        common::auth(http.get(format!("{base}/me/guild-invites")), &invitee_token)
             .send()
             .await
             .unwrap()
@@ -137,7 +136,7 @@ async fn invite_accept_join_and_leave_flow() {
             .unwrap();
     assert!(my_invites_after.as_array().unwrap().is_empty());
 
-    let members: serde_json::Value = auth(
+    let members: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/members")),
         &owner_token,
     )
@@ -149,7 +148,7 @@ async fn invite_accept_join_and_leave_flow() {
     .unwrap();
     assert_eq!(members.as_array().unwrap().len(), 2);
 
-    let leave = auth(
+    let leave = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/leave")),
         &invitee_token,
     )
@@ -158,7 +157,7 @@ async fn invite_accept_join_and_leave_flow() {
     .unwrap();
     assert!(leave.status().is_success(), "{:?}", leave.status());
 
-    let members_after: serde_json::Value = auth(
+    let members_after: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/members")),
         &owner_token,
     )
@@ -180,7 +179,7 @@ async fn joining_an_invite_only_guild_directly_is_rejected() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_other_id, other_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -191,7 +190,7 @@ async fn joining_an_invite_only_guild_directly_is_rejected() {
     // touches join_policy, so it always exercises the closed path.
     assert_eq!(body["join_policy"].as_str().unwrap(), "invite_only");
 
-    let join = auth(
+    let join = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join")),
         &other_token,
     )
@@ -210,7 +209,7 @@ async fn opening_a_guild_lets_a_stranger_join_directly_bypassing_requests_and_in
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (other_id, other_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -218,7 +217,7 @@ async fn opening_a_guild_lets_a_stranger_join_directly_bypassing_requests_and_in
     let body: serde_json::Value = create.json().await.unwrap();
     let guild_id = body["id"].as_str().unwrap();
 
-    let patch = auth(
+    let patch = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}")),
         &owner_token,
     )
@@ -231,7 +230,7 @@ async fn opening_a_guild_lets_a_stranger_join_directly_bypassing_requests_and_in
     assert_eq!(patched["join_policy"].as_str().unwrap(), "open");
 
     // No invite, no join-request/approval round trip — straight to member.
-    let join = auth(
+    let join = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join")),
         &other_token,
     )
@@ -245,7 +244,7 @@ async fn opening_a_guild_lets_a_stranger_join_directly_bypassing_requests_and_in
         other_id.to_string()
     );
 
-    let members = auth(
+    let members = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/members")),
         &owner_token,
     )
@@ -268,7 +267,7 @@ async fn the_owner_cannot_leave_or_be_removed() {
     let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -276,7 +275,7 @@ async fn the_owner_cannot_leave_or_be_removed() {
     let body: serde_json::Value = create.json().await.unwrap();
     let guild_id = body["id"].as_str().unwrap();
 
-    let leave = auth(
+    let leave = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/leave")),
         &owner_token,
     )
@@ -285,7 +284,7 @@ async fn the_owner_cannot_leave_or_be_removed() {
     .unwrap();
     assert_eq!(leave.status(), reqwest::StatusCode::FORBIDDEN);
 
-    let remove = auth(
+    let remove = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/members/{owner_id}")),
         &owner_token,
     )
@@ -305,7 +304,7 @@ async fn an_officer_cannot_remove_another_officer_without_manage_roles() {
     let (officer_a_id, officer_a_token) = seed_identity_session(&pool).await;
     let (officer_b_id, officer_b_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -319,7 +318,7 @@ async fn an_officer_cannot_remove_another_officer_without_manage_roles() {
         (officer_a_id, &officer_a_token),
         (officer_b_id, &officer_b_token),
     ] {
-        let invite = auth(
+        let invite = common::auth(
             http.post(format!("{base}/guilds/{guild_id}/invites")),
             &owner_token,
         )
@@ -329,7 +328,7 @@ async fn an_officer_cannot_remove_another_officer_without_manage_roles() {
         .unwrap();
         let invite_body: serde_json::Value = invite.json().await.unwrap();
         let invite_id = invite_body["id"].as_str().unwrap();
-        auth(
+        common::auth(
             http.post(format!(
                 "{base}/guilds/{guild_id}/invites/{invite_id}/accept"
             )),
@@ -343,12 +342,12 @@ async fn an_officer_cannot_remove_another_officer_without_manage_roles() {
         // `creating_a_guild_makes_the_creator_the_owner`. Officer grants
         // `manage_members`, so this promotion is an escalation and needs a
         // fresh signature.
-        let signature = sign_action(
+        let signature = common::sign_action(
             &signing_key,
             "guild.member_role.update",
             &[guild_id, &identity_id.to_string(), "1"],
         );
-        let promote = auth(
+        let promote = common::auth(
             http.patch(format!("{base}/guilds/{guild_id}/members/{identity_id}")),
             &owner_token,
         )
@@ -364,7 +363,7 @@ async fn an_officer_cannot_remove_another_officer_without_manage_roles() {
     }
 
     // Officer A (manage_members, no manage_roles) tries to remove Officer B.
-    let remove = auth(
+    let remove = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/members/{officer_b_id}")),
         &officer_a_token,
     )
@@ -389,7 +388,7 @@ async fn applying_to_a_recruiting_guild_succeeds_and_is_listed_pending() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -401,7 +400,7 @@ async fn applying_to_a_recruiting_guild_succeeds_and_is_listed_pending() {
     let apply_body: serde_json::Value = apply.json().await.unwrap();
     assert_eq!(apply_body["status"].as_str().unwrap(), "pending");
 
-    let pending: serde_json::Value = auth(
+    let pending: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests")),
         &owner_token,
     )
@@ -434,7 +433,7 @@ async fn applying_to_a_non_recruiting_guild_is_rejected() {
     let guild_id = guild["id"].as_str().unwrap();
     assert!(!guild["recruiting"].as_bool().unwrap());
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -461,7 +460,7 @@ async fn duplicate_apply_while_pending_is_idempotent() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    let first = auth(
+    let first = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -472,7 +471,7 @@ async fn duplicate_apply_while_pending_is_idempotent() {
     assert!(first.status().is_success(), "{:?}", first.status());
     let first_body: serde_json::Value = first.json().await.unwrap();
 
-    let second = auth(
+    let second = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -503,7 +502,7 @@ async fn approving_a_join_request_adds_membership() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -516,7 +515,7 @@ async fn approving_a_join_request_adds_membership() {
 
     assert_eq!(member_count(&http, &base, &owner_token, guild_id).await, 1);
 
-    let approve = auth(
+    let approve = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}/approve"
         )),
@@ -534,7 +533,7 @@ async fn approving_a_join_request_adds_membership() {
 
     assert_eq!(member_count(&http, &base, &owner_token, guild_id).await, 2);
 
-    let all: serde_json::Value = auth(
+    let all: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests?status=all")),
         &owner_token,
     )
@@ -562,7 +561,7 @@ async fn rejecting_a_join_request_leaves_membership_unchanged() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -573,7 +572,7 @@ async fn rejecting_a_join_request_leaves_membership_unchanged() {
     let apply_body: serde_json::Value = apply.json().await.unwrap();
     let request_id = apply_body["id"].as_str().unwrap();
 
-    let reject = auth(
+    let reject = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}/reject"
         )),
@@ -602,7 +601,7 @@ async fn withdrawing_a_join_request_leaves_membership_unchanged() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -613,7 +612,7 @@ async fn withdrawing_a_join_request_leaves_membership_unchanged() {
     let apply_body: serde_json::Value = apply.json().await.unwrap();
     let request_id = apply_body["id"].as_str().unwrap();
 
-    let withdraw = auth(
+    let withdraw = common::auth(
         http.delete(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}"
         )),
@@ -626,7 +625,7 @@ async fn withdrawing_a_join_request_leaves_membership_unchanged() {
 
     assert_eq!(member_count(&http, &base, &owner_token, guild_id).await, 1);
 
-    let approve = auth(
+    let approve = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}/approve"
         )),
@@ -653,7 +652,7 @@ async fn non_manager_cannot_approve_or_reject_a_join_request() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -664,7 +663,7 @@ async fn non_manager_cannot_approve_or_reject_a_join_request() {
     let apply_body: serde_json::Value = apply.json().await.unwrap();
     let request_id = apply_body["id"].as_str().unwrap();
 
-    let approve = auth(
+    let approve = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}/approve"
         )),
@@ -675,7 +674,7 @@ async fn non_manager_cannot_approve_or_reject_a_join_request() {
     .unwrap();
     assert_eq!(approve.status(), reqwest::StatusCode::FORBIDDEN);
 
-    let reject = auth(
+    let reject = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}/reject"
         )),
@@ -703,7 +702,7 @@ async fn only_the_applicant_can_withdraw_their_own_join_request() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -714,7 +713,7 @@ async fn only_the_applicant_can_withdraw_their_own_join_request() {
     let apply_body: serde_json::Value = apply.json().await.unwrap();
     let request_id = apply_body["id"].as_str().unwrap();
 
-    let withdraw_by_bystander = auth(
+    let withdraw_by_bystander = common::auth(
         http.delete(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}"
         )),
@@ -728,7 +727,7 @@ async fn only_the_applicant_can_withdraw_their_own_join_request() {
         reqwest::StatusCode::NOT_FOUND
     );
 
-    let withdraw_by_owner = auth(
+    let withdraw_by_owner = common::auth(
         http.delete(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}"
         )),
@@ -741,7 +740,7 @@ async fn only_the_applicant_can_withdraw_their_own_join_request() {
 
     // The request is still pending and can be withdrawn by the actual
     // applicant.
-    let withdraw = auth(
+    let withdraw = common::auth(
         http.delete(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}"
         )),
@@ -771,7 +770,7 @@ async fn my_join_request_returns_own_pending_request_or_none() {
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
     // Before applying: no pending request of the applicant's own.
-    let before = auth(
+    let before = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests/mine")),
         &applicant_token,
     )
@@ -782,7 +781,7 @@ async fn my_join_request_returns_own_pending_request_or_none() {
     let before_body: serde_json::Value = before.json().await.unwrap();
     assert!(before_body.is_null());
 
-    let apply = auth(
+    let apply = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -795,7 +794,7 @@ async fn my_join_request_returns_own_pending_request_or_none() {
 
     // After applying: the applicant's own pending request comes back,
     // matching the same shape POST already returned.
-    let after = auth(
+    let after = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests/mine")),
         &applicant_token,
     )
@@ -832,7 +831,7 @@ async fn my_join_request_never_returns_another_identitys_request() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    auth(
+    common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -843,7 +842,7 @@ async fn my_join_request_never_returns_another_identitys_request() {
 
     // The bystander never applied — `mine` reports none for them even
     // though the applicant has a pending request in this same guild.
-    let bystander_mine = auth(
+    let bystander_mine = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests/mine")),
         &bystander_token,
     )
@@ -859,7 +858,7 @@ async fn my_join_request_never_returns_another_identitys_request() {
     assert!(bystander_body.is_null());
 
     // The owner also has no pending request of their own here.
-    let owner_mine = auth(
+    let owner_mine = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests/mine")),
         &owner_token,
     )
@@ -892,7 +891,7 @@ async fn my_join_request_then_withdraw_is_reachable_end_to_end() {
     let guild_id = guild["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
-    auth(
+    common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join-requests")),
         &applicant_token,
     )
@@ -901,7 +900,7 @@ async fn my_join_request_then_withdraw_is_reachable_end_to_end() {
     .await
     .unwrap();
 
-    let mine = auth(
+    let mine = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests/mine")),
         &applicant_token,
     )
@@ -911,7 +910,7 @@ async fn my_join_request_then_withdraw_is_reachable_end_to_end() {
     let mine_body: serde_json::Value = mine.json().await.unwrap();
     let request_id = mine_body["id"].as_str().unwrap().to_string();
 
-    let withdraw = auth(
+    let withdraw = common::auth(
         http.delete(format!(
             "{base}/guilds/{guild_id}/join-requests/{request_id}"
         )),
@@ -922,7 +921,7 @@ async fn my_join_request_then_withdraw_is_reachable_end_to_end() {
     .unwrap();
     assert!(withdraw.status().is_success(), "{:?}", withdraw.status());
 
-    let mine_after = auth(
+    let mine_after = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/join-requests/mine")),
         &applicant_token,
     )
@@ -948,7 +947,7 @@ async fn escalating_a_member_role_without_a_signature_is_rejected() {
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (other_id, other_token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -957,12 +956,12 @@ async fn escalating_a_member_role_without_a_signature_is_rejected() {
     let guild_id = guild["id"].as_str().unwrap();
 
     let (signing_key_id, signing_key) = seed_signing_key(&pool, owner_id).await;
-    let create_signature = sign_action(
+    let create_signature = common::sign_action(
         &signing_key,
         "guild.role.create",
         &[guild_id, "Co-Officer", "manage_roles"],
     );
-    let create_role = auth(
+    let create_role = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/roles")),
         &owner_token,
     )
@@ -978,7 +977,7 @@ async fn escalating_a_member_role_without_a_signature_is_rejected() {
     let role: serde_json::Value = create_role.json().await.unwrap();
     let name_index = role["name_index"].as_i64().unwrap();
 
-    let open = auth(
+    let open = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}")),
         &owner_token,
     )
@@ -987,7 +986,7 @@ async fn escalating_a_member_role_without_a_signature_is_rejected() {
     .await
     .unwrap();
     assert!(open.status().is_success());
-    let join = auth(
+    let join = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join")),
         &other_token,
     )
@@ -996,7 +995,7 @@ async fn escalating_a_member_role_without_a_signature_is_rejected() {
     .unwrap();
     assert!(join.status().is_success());
 
-    let unsigned_assign = auth(
+    let unsigned_assign = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/members/{other_id}")),
         &owner_token,
     )
@@ -1011,7 +1010,7 @@ async fn escalating_a_member_role_without_a_signature_is_rejected() {
     let unsigned_body: serde_json::Value = unsigned_assign.json().await.unwrap();
     assert_eq!(unsigned_body["code"], "FRESH_SIGNATURE_REQUIRED");
 
-    let members: serde_json::Value = auth(
+    let members: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/members")),
         &owner_token,
     )

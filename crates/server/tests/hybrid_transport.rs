@@ -32,9 +32,6 @@ use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOption
 
 mod common;
 
-/// Named so `Client`'s ceremony state can be carried across `await` points —
-/// see `crates/server/tests/passkeys.rs`'s identical type alias for why the
-/// TLD-verifier parameter has to be spelled out explicitly.
 #[tokio::test]
 #[ignore]
 async fn registration_and_login_challenges_do_not_restrict_authenticator_attachment() {

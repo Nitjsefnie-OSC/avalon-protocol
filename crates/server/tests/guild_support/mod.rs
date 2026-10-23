@@ -1,9 +1,8 @@
 //! Shared identity, signing, and guild setup helpers for the guild integration tests.
 #![allow(dead_code)]
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+use crate::common;
+use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -27,16 +26,6 @@ pub async fn seed_signing_key(
     .expect("failed to seed signing key");
     let key_id: Uuid = sqlx::Row::try_get(&row, "id").unwrap();
     (key_id, signing_key)
-}
-
-/// Mirrors `crate::signature_gate::canonical_message` byte-for-byte.
-pub fn sign_action(signing_key: &SigningKey, action_tag: &str, fields: &[&str]) -> String {
-    let mut message = format!("avalon:{action_tag}:v1");
-    for field in fields {
-        message.push(':');
-        message.push_str(field);
-    }
-    BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
 }
 
 /// Seeds a bare identity + session, bypassing WebAuthn entirely, and
@@ -70,10 +59,6 @@ pub async fn seed_identity_session(pool: &PgPool) -> (avalon_protocol::ids::Iden
     (identity_id, token)
 }
 
-pub fn auth(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    request.bearer_auth(token)
-}
-
 /// A short random tag/name pair so concurrent test runs never collide on
 /// the case-insensitive uniqueness constraints.
 pub fn unique_guild_body() -> serde_json::Value {
@@ -97,7 +82,7 @@ pub async fn create_guild(
         "tag": suffix[..5].to_uppercase(),
         "description": format!("a discover-test guild ({name_hint})"),
     });
-    let create = auth(http.post(format!("{base}/guilds")), token)
+    let create = common::auth(http.post(format!("{base}/guilds")), token)
         .json(&body)
         .send()
         .await
@@ -113,7 +98,7 @@ pub async fn set_recruiting(
     guild_id: &str,
     recruiting: bool,
 ) {
-    let patch = auth(http.patch(format!("{base}/guilds/{guild_id}")), token)
+    let patch = common::auth(http.patch(format!("{base}/guilds/{guild_id}")), token)
         .json(&serde_json::json!({ "recruiting": recruiting }))
         .send()
         .await

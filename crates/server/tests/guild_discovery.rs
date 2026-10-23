@@ -8,7 +8,7 @@ use uuid::Uuid;
 mod common;
 mod guild_support;
 
-use guild_support::{auth, create_guild, seed_identity_session, set_recruiting, unique_guild_body};
+use guild_support::{create_guild, seed_identity_session, set_recruiting, unique_guild_body};
 
 /// Seeds a `integrators` row directly (bypassing the integrator registration ceremony,
 /// same "seed via SQL, endpoint behavior doesn't depend on how the row got
@@ -75,7 +75,7 @@ async fn invite_and_accept(
     guild_id: &str,
     to_identity_id: avalon_protocol::ids::IdentityId,
 ) {
-    let invite = auth(
+    let invite = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/invites")),
         owner_token,
     )
@@ -87,7 +87,7 @@ async fn invite_and_accept(
     let invite_body: serde_json::Value = invite.json().await.unwrap();
     let invite_id = invite_body["id"].as_str().unwrap();
 
-    let accept = auth(
+    let accept = common::auth(
         http.post(format!(
             "{base}/guilds/{guild_id}/invites/{invite_id}/accept"
         )),
@@ -125,7 +125,7 @@ async fn recruiting_filter_excludes_non_recruiting_guilds_from_general_browse() 
     // A stranger's default browse (no `recruiting=` filter) sees the
     // recruiting guild but not the closed one.
     let browse: serde_json::Value =
-        auth(http.get(format!("{base}/guilds/discover")), &stranger_token)
+        common::auth(http.get(format!("{base}/guilds/discover")), &stranger_token)
             .send()
             .await
             .unwrap()
@@ -142,7 +142,7 @@ async fn recruiting_filter_excludes_non_recruiting_guilds_from_general_browse() 
     assert!(!ids.contains(&closed_id));
 
     // Exact id lookup still finds the closed guild, unchanged.
-    let direct = auth(
+    let direct = common::auth(
         http.get(format!("{base}/guilds/{closed_id}")),
         &stranger_token,
     )
@@ -154,7 +154,7 @@ async fn recruiting_filter_excludes_non_recruiting_guilds_from_general_browse() 
     // `recruiting=false` from a stranger must NOT bulk-leak the closed
     // guild (or any other non-recruiting guild the stranger isn't in) —
     // it stays membership-gated, so a non-member sees nothing here either.
-    let closed_browse: serde_json::Value = auth(
+    let closed_browse: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/discover?recruiting=false")),
         &stranger_token,
     )
@@ -175,7 +175,7 @@ async fn recruiting_filter_excludes_non_recruiting_guilds_from_general_browse() 
 
     // The owner, who *is* a member of the closed guild, sees it under an
     // explicit `recruiting=false` query.
-    let owner_closed_browse: serde_json::Value = auth(
+    let owner_closed_browse: serde_json::Value = common::auth(
         http.get(format!("{base}/guilds/discover?recruiting=false")),
         &owner_token,
     )
@@ -208,13 +208,14 @@ async fn a_member_still_sees_their_own_non_recruiting_guild_in_default_browse() 
     let closed_guild = create_guild(&http, &base, &owner_token, "Own Closed Guild").await;
     let closed_id = closed_guild["id"].as_str().unwrap();
 
-    let browse: serde_json::Value = auth(http.get(format!("{base}/guilds/discover")), &owner_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let browse: serde_json::Value =
+        common::auth(http.get(format!("{base}/guilds/discover")), &owner_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     let ids: Vec<&str> = browse["guilds"]
         .as_array()
         .unwrap()
@@ -239,7 +240,7 @@ async fn discover_card_includes_banner_and_icon() {
     let with_media = create_guild(&http, &base, &owner_token, "Media Guild").await;
     let with_media_id = with_media["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, with_media_id, true).await;
-    let patch = auth(
+    let patch = common::auth(
         http.patch(format!("{base}/guilds/{with_media_id}")),
         &owner_token,
     )
@@ -256,13 +257,14 @@ async fn discover_card_includes_banner_and_icon() {
     let without_media_id = without_media["id"].as_str().unwrap();
     set_recruiting(&http, &base, &owner_token, without_media_id, true).await;
 
-    let browse: serde_json::Value = auth(http.get(format!("{base}/guilds/discover")), &owner_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let browse: serde_json::Value =
+        common::auth(http.get(format!("{base}/guilds/discover")), &owner_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     let guilds = browse["guilds"].as_array().unwrap();
 
     let with_media_card = guilds
@@ -302,7 +304,7 @@ async fn search_matches_name_and_tag_substrings_case_insensitively() {
         "tag": suffix[..5].to_uppercase(),
         "description": "a discover-test guild",
     });
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&body)
         .send()
         .await
@@ -313,7 +315,7 @@ async fn search_matches_name_and_tag_substrings_case_insensitively() {
     set_recruiting(&http, &base, &owner_token, guild_id, true).await;
 
     let lowercase_query = unique_word.to_lowercase();
-    let search: serde_json::Value = auth(
+    let search: serde_json::Value = common::auth(
         http.get(format!(
             "{base}/guilds/discover?q={lowercase_query}&recruiting=true"
         )),
@@ -358,7 +360,7 @@ async fn pagination_does_not_skip_or_duplicate_rows_across_pages() {
             Some(c) => format!("{base}/guilds/discover?recruiting=true&limit=2&cursor={c}"),
             None => format!("{base}/guilds/discover?recruiting=true&limit=2"),
         };
-        let page: serde_json::Value = auth(http.get(url), &owner_token)
+        let page: serde_json::Value = common::auth(http.get(url), &owner_token)
             .send()
             .await
             .unwrap()
@@ -406,7 +408,7 @@ async fn game_breakdown_reflects_active_bindings_and_updates_as_they_change() {
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (member_id, member_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -440,7 +442,7 @@ async fn game_breakdown_reflects_active_bindings_and_updates_as_they_change() {
         let guild_id = guild_id.to_string();
         let token = owner_token.clone();
         async move {
-            auth(
+            common::auth(
                 http.get(format!("{base}/guilds/{guild_id}/integrator-breakdown")),
                 &token,
             )
@@ -491,7 +493,7 @@ async fn game_breakdown_reflects_active_bindings_and_updates_as_they_change() {
 
     // A plain member (no manage_guild) cannot fetch the breakdown while
     // the guild hasn't opted into public exposure.
-    let member_view = auth(
+    let member_view = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/integrator-breakdown")),
         &member_token,
     )
@@ -515,7 +517,7 @@ async fn game_breakdown_public_toggle_gates_exposure_to_non_members() {
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_stranger_id, stranger_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -528,7 +530,7 @@ async fn game_breakdown_public_toggle_gates_exposure_to_non_members() {
     seed_binding(&pool, owner_id, ashen).await;
 
     // Not public yet: a non-member (and non-manager) is rejected.
-    let before = auth(
+    let before = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/integrator-breakdown")),
         &stranger_token,
     )
@@ -538,7 +540,7 @@ async fn game_breakdown_public_toggle_gates_exposure_to_non_members() {
     assert_eq!(before.status(), reqwest::StatusCode::FORBIDDEN);
 
     // The owner can always see it regardless of the toggle.
-    let owner_view = auth(
+    let owner_view = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/integrator-breakdown")),
         &owner_token,
     )
@@ -551,7 +553,7 @@ async fn game_breakdown_public_toggle_gates_exposure_to_non_members() {
         owner_view.status()
     );
 
-    let patch = auth(
+    let patch = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}")),
         &owner_token,
     )
@@ -564,7 +566,7 @@ async fn game_breakdown_public_toggle_gates_exposure_to_non_members() {
     assert!(patched["game_breakdown_public"].as_bool().unwrap());
 
     // Now public: the same stranger can fetch it.
-    let after = auth(
+    let after = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/integrator-breakdown")),
         &stranger_token,
     )
@@ -592,7 +594,7 @@ async fn pin_reorder_and_unpin_round_trip() {
     let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -615,7 +617,7 @@ async fn pin_reorder_and_unpin_round_trip() {
         let guild_id = guild_id.to_string();
         let token = owner_token.clone();
         async move {
-            auth(
+            common::auth(
                 http.put(format!("{base}/guilds/{guild_id}/favorite-integrators")),
                 &token,
             )
@@ -656,7 +658,7 @@ async fn pin_reorder_and_unpin_round_trip() {
         .collect();
     assert_eq!(names, vec!["Ocean World", "Ashen Realms"]);
 
-    let get = auth(
+    let get = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/favorite-integrators")),
         &owner_token,
     )
@@ -706,7 +708,7 @@ async fn a_sixth_pin_is_rejected_over_http() {
     let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -721,7 +723,7 @@ async fn a_sixth_pin_is_rejected_over_http() {
         integrator_ids.push(integrator_id);
     }
 
-    let resp = auth(
+    let resp = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/favorite-integrators")),
         &owner_token,
     )
@@ -743,7 +745,7 @@ async fn a_stale_pin_is_flagged_but_not_auto_removed() {
     let pool = common::test_pool().await;
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -754,7 +756,7 @@ async fn a_stale_pin_is_flagged_but_not_auto_removed() {
     let ashen = seed_integrator(&pool, "Ashen Realms").await;
     let binding_id = seed_binding(&pool, owner_id, ashen).await;
 
-    let pin = auth(
+    let pin = common::auth(
         http.put(format!("{base}/guilds/{guild_id}/favorite-integrators")),
         &owner_token,
     )
@@ -768,7 +770,7 @@ async fn a_stale_pin_is_flagged_but_not_auto_removed() {
     // survive this untouched, just flagged stale.
     end_binding(&pool, binding_id).await;
 
-    let get = auth(
+    let get = common::auth(
         http.get(format!("{base}/guilds/{guild_id}/favorite-integrators")),
         &owner_token,
     )

@@ -5,9 +5,7 @@
 mod common;
 mod guild_support;
 
-use guild_support::{
-    auth, seed_identity_session, seed_signing_key, sign_action, unique_guild_body,
-};
+use guild_support::{seed_identity_session, seed_signing_key, unique_guild_body};
 
 /// Issue #152: creating a role with a description/badge round-trips
 /// through `GET /guilds/{id}/roles`.
@@ -19,7 +17,7 @@ async fn creating_a_role_with_description_and_badge_round_trips() {
     let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -29,12 +27,12 @@ async fn creating_a_role_with_description_and_badge_round_trips() {
     let guild_id = guild["id"].as_str().unwrap();
 
     let (signing_key_id, signing_key) = seed_signing_key(&pool, owner_id).await;
-    let signature = sign_action(
+    let signature = common::sign_action(
         &signing_key,
         "guild.role.create",
         &[guild_id, "Raid Leader", "manage_members"],
     );
-    let create_role = auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
+    let create_role = common::auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
         .json(&serde_json::json!({
             "name": "Raid Leader",
             "permissions": ["manage_members"],
@@ -60,7 +58,7 @@ async fn creating_a_role_with_description_and_badge_round_trips() {
     assert_eq!(created["badge"]["color"].as_str().unwrap(), "purple");
 
     let roles: serde_json::Value =
-        auth(http.get(format!("{base}/guilds/{guild_id}/roles")), &token)
+        common::auth(http.get(format!("{base}/guilds/{guild_id}/roles")), &token)
             .send()
             .await
             .unwrap()
@@ -91,7 +89,7 @@ async fn creating_a_role_with_an_unknown_badge_icon_is_rejected() {
     let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -100,8 +98,9 @@ async fn creating_a_role_with_an_unknown_badge_icon_is_rejected() {
     let guild_id = guild["id"].as_str().unwrap();
 
     let (signing_key_id, signing_key) = seed_signing_key(&pool, owner_id).await;
-    let signature = sign_action(&signing_key, "guild.role.create", &[guild_id, "Bogus", ""]);
-    let create_role = auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
+    let signature =
+        common::sign_action(&signing_key, "guild.role.create", &[guild_id, "Bogus", ""]);
+    let create_role = common::auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
         .json(&serde_json::json!({
             "name": "Bogus",
             "badge": { "icon": "not_a_real_icon", "color": "gold" },
@@ -125,7 +124,7 @@ async fn creating_a_role_with_a_name_already_taken_in_the_guild_is_rejected() {
     let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -134,12 +133,12 @@ async fn creating_a_role_with_a_name_already_taken_in_the_guild_is_rejected() {
     let guild_id = guild["id"].as_str().unwrap();
 
     let (signing_key_id, signing_key) = seed_signing_key(&pool, owner_id).await;
-    let first_signature = sign_action(
+    let first_signature = common::sign_action(
         &signing_key,
         "guild.role.create",
         &[guild_id, "Raid Leader", ""],
     );
-    let first = auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
+    let first = common::auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
         .json(&serde_json::json!({
             "name": "Raid Leader",
             "signing_key_id": signing_key_id,
@@ -150,12 +149,12 @@ async fn creating_a_role_with_a_name_already_taken_in_the_guild_is_rejected() {
         .unwrap();
     assert!(first.status().is_success());
 
-    let duplicate_signature = sign_action(
+    let duplicate_signature = common::sign_action(
         &signing_key,
         "guild.role.create",
         &[guild_id, "raid leader", ""],
     );
-    let duplicate = auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
+    let duplicate = common::auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
         .json(&serde_json::json!({
             "name": "raid leader",
             "signing_key_id": signing_key_id,
@@ -178,7 +177,7 @@ async fn the_owner_role_can_be_renamed_but_not_have_its_permissions_changed() {
     let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -187,8 +186,8 @@ async fn the_owner_role_can_be_renamed_but_not_have_its_permissions_changed() {
     let guild_id = guild["id"].as_str().unwrap();
 
     let (signing_key_id, signing_key) = seed_signing_key(&pool, owner_id).await;
-    let signature = sign_action(&signing_key, "guild.role.update", &[guild_id, "0"]);
-    let rename = auth(
+    let signature = common::sign_action(&signing_key, "guild.role.update", &[guild_id, "0"]);
+    let rename = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/roles/0")),
         &token,
     )
@@ -204,8 +203,8 @@ async fn the_owner_role_can_be_renamed_but_not_have_its_permissions_changed() {
     let renamed: serde_json::Value = rename.json().await.unwrap();
     assert_eq!(renamed["name"].as_str().unwrap(), "Guild Master");
 
-    let signature = sign_action(&signing_key, "guild.role.update", &[guild_id, "0"]);
-    let change_permissions = auth(
+    let signature = common::sign_action(&signing_key, "guild.role.update", &[guild_id, "0"]);
+    let change_permissions = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/roles/0")),
         &token,
     )
@@ -231,7 +230,7 @@ async fn deleting_a_role() {
     let pool = common::test_pool().await;
     let (owner_id, token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -242,8 +241,8 @@ async fn deleting_a_role() {
     let (signing_key_id, signing_key) = seed_signing_key(&pool, owner_id).await;
 
     // Base roles: owner (0) and member (2) can never be deleted.
-    let signature = sign_action(&signing_key, "guild.role.delete", &[guild_id, "0"]);
-    let delete_owner = auth(
+    let signature = common::sign_action(&signing_key, "guild.role.delete", &[guild_id, "0"]);
+    let delete_owner = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/roles/0")),
         &token,
     )
@@ -253,8 +252,8 @@ async fn deleting_a_role() {
     .unwrap();
     assert_eq!(delete_owner.status(), reqwest::StatusCode::FORBIDDEN);
 
-    let signature = sign_action(&signing_key, "guild.role.delete", &[guild_id, "2"]);
-    let delete_member = auth(
+    let signature = common::sign_action(&signing_key, "guild.role.delete", &[guild_id, "2"]);
+    let delete_member = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/roles/2")),
         &token,
     )
@@ -265,12 +264,12 @@ async fn deleting_a_role() {
     assert_eq!(delete_member.status(), reqwest::StatusCode::FORBIDDEN);
 
     // A freshly created, unassigned custom role deletes cleanly.
-    let create_signature = sign_action(
+    let create_signature = common::sign_action(
         &signing_key,
         "guild.role.create",
         &[guild_id, "Temp Role", ""],
     );
-    let create_role = auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
+    let create_role = common::auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
         .json(&serde_json::json!({
             "name": "Temp Role",
             "signing_key_id": signing_key_id,
@@ -282,12 +281,12 @@ async fn deleting_a_role() {
     let role: serde_json::Value = create_role.json().await.unwrap();
     let name_index = role["name_index"].as_i64().unwrap();
 
-    let delete_signature = sign_action(
+    let delete_signature = common::sign_action(
         &signing_key,
         "guild.role.delete",
         &[guild_id, &name_index.to_string()],
     );
-    let delete = auth(
+    let delete = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/roles/{name_index}")),
         &token,
     )
@@ -301,7 +300,7 @@ async fn deleting_a_role() {
     assert!(delete.status().is_success(), "{:?}", delete.status());
 
     let roles: serde_json::Value =
-        auth(http.get(format!("{base}/guilds/{guild_id}/roles")), &token)
+        common::auth(http.get(format!("{base}/guilds/{guild_id}/roles")), &token)
             .send()
             .await
             .unwrap()
@@ -327,7 +326,7 @@ async fn deleting_a_role_still_held_by_a_member_is_rejected() {
     let (owner_id, owner_token) = seed_identity_session(&pool).await;
     let (other_id, other_token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -336,12 +335,12 @@ async fn deleting_a_role_still_held_by_a_member_is_rejected() {
     let guild_id = guild["id"].as_str().unwrap();
 
     let (signing_key_id, signing_key) = seed_signing_key(&pool, owner_id).await;
-    let create_signature = sign_action(
+    let create_signature = common::sign_action(
         &signing_key,
         "guild.role.create",
         &[guild_id, "Quartermaster", ""],
     );
-    let create_role = auth(
+    let create_role = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/roles")),
         &owner_token,
     )
@@ -356,7 +355,7 @@ async fn deleting_a_role_still_held_by_a_member_is_rejected() {
     let role: serde_json::Value = create_role.json().await.unwrap();
     let name_index = role["name_index"].as_i64().unwrap();
 
-    let open = auth(
+    let open = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}")),
         &owner_token,
     )
@@ -366,7 +365,7 @@ async fn deleting_a_role_still_held_by_a_member_is_rejected() {
     .unwrap();
     assert!(open.status().is_success());
 
-    let join = auth(
+    let join = common::auth(
         http.post(format!("{base}/guilds/{guild_id}/join")),
         &other_token,
     )
@@ -375,7 +374,7 @@ async fn deleting_a_role_still_held_by_a_member_is_rejected() {
     .unwrap();
     assert!(join.status().is_success());
 
-    let assign = auth(
+    let assign = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/members/{other_id}")),
         &owner_token,
     )
@@ -385,12 +384,12 @@ async fn deleting_a_role_still_held_by_a_member_is_rejected() {
     .unwrap();
     assert!(assign.status().is_success(), "{:?}", assign.status());
 
-    let delete_signature = sign_action(
+    let delete_signature = common::sign_action(
         &signing_key,
         "guild.role.delete",
         &[guild_id, &name_index.to_string()],
     );
-    let delete = auth(
+    let delete = common::auth(
         http.delete(format!("{base}/guilds/{guild_id}/roles/{name_index}")),
         &owner_token,
     )
@@ -413,7 +412,7 @@ async fn a_role_change_by_a_non_manager_is_rejected() {
     let (_owner_id, owner_token) = seed_identity_session(&pool).await;
     let (_other_id, other_token) = seed_identity_session(&pool).await;
 
-    let create = auth(http.post(format!("{base}/guilds")), &owner_token)
+    let create = common::auth(http.post(format!("{base}/guilds")), &owner_token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -423,7 +422,7 @@ async fn a_role_change_by_a_non_manager_is_rejected() {
 
     // Index 1 is "officer" — see the starter-role ordering asserted in
     // `creating_a_guild_makes_the_creator_the_owner`.
-    let update = auth(
+    let update = common::auth(
         http.patch(format!("{base}/guilds/{guild_id}/roles/1")),
         &other_token,
     )
@@ -445,7 +444,7 @@ async fn creating_a_role_without_a_signature_is_rejected() {
     let pool = common::test_pool().await;
     let (_owner_id, token) = seed_identity_session(&pool).await;
 
-    let create_guild = auth(http.post(format!("{base}/guilds")), &token)
+    let create_guild = common::auth(http.post(format!("{base}/guilds")), &token)
         .json(&unique_guild_body())
         .send()
         .await
@@ -453,7 +452,7 @@ async fn creating_a_role_without_a_signature_is_rejected() {
     let guild: serde_json::Value = create_guild.json().await.unwrap();
     let guild_id = guild["id"].as_str().unwrap();
 
-    let create_role = auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
+    let create_role = common::auth(http.post(format!("{base}/guilds/{guild_id}/roles")), &token)
         .json(&serde_json::json!({ "name": "Unsigned Role" }))
         .send()
         .await
@@ -463,7 +462,7 @@ async fn creating_a_role_without_a_signature_is_rejected() {
     assert_eq!(body["code"], "NO_REGISTERED_SIGNING_KEY");
 
     let roles: serde_json::Value =
-        auth(http.get(format!("{base}/guilds/{guild_id}/roles")), &token)
+        common::auth(http.get(format!("{base}/guilds/{guild_id}/roles")), &token)
             .send()
             .await
             .unwrap()
